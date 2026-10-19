@@ -1,0 +1,13 @@
+services:
+  qdrant:
+    image: ${QDRANT_IMAGE:-qdrant/qdrant:v1.19.2}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    mem_limit: ${QDRANT_MEMORY_LIMIT:-28g}
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    stop_grace_period: 1m

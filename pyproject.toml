@@ -1,0 +1,43 @@
+[project]
+name = "quantization-comparison-bench"
+version = "0.1.0"
+description = "Reproducible VM benchmark for Qdrant quantization, oversampling, and rescoring"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "numpy>=2.5.4",
+    "pydantic>=2.14.1",
+    "pyyaml>=6.0.3",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+qbench = "quantization_comparison_bench.cli:main"
+
+[project.optional-dependencies]
+datasets = [
+    "datasets>=5.1.0",
+]
+bge = [
+    "sentence-transformers>=6.1.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.1",
+    "ty>=0.0.89",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "ASYNC"]
+# Local artifact reads/writes are deliberately synchronous.
+ignore = ["ASYNC240"]

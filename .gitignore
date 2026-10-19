@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Credentials and generated experiment artifacts
+.env
+.env.*
+!.env.example
+data/
+results/
+storage/
+.cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.DS_Store

@@ -1,0 +1,66 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run ty check src/
+      - run: uv run qbench fixture --output data/synthetic
+      - run: uv run qbench verify --data data/synthetic
+      - run: uv run qbench ground-truth --data data/synthetic
+      - run: uv run qbench plan --config configs/benchmark.yaml
+
+  live-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.19.2
+        ports:
+          - 6333:6333
+    env:
+      QDRANT_URL: http://127.0.0.1:6333
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.3"
+      - run: uv sync --locked
+      - name: Wait for Qdrant
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:6333/readyz; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+      - run: uv run qbench doctor
+      - run: uv run qbench fixture --output data/synthetic
+      - run: uv run qbench verify --data data/synthetic
+      - run: uv run qbench ground-truth --data data/synthetic
+      - run: uv run qbench run --config configs/smoke.yaml --data data/synthetic --output results/smoke
+      - run: uv run qbench summarize --input results/smoke
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: synthetic-smoke
+          path: results/smoke/
+          if-no-files-found: ignore
