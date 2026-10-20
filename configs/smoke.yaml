@@ -17,10 +17,13 @@ methods:
   - {name: float32, quantizer: none}
   - {name: scalar8, quantizer: scalar}
   - {name: binary1, quantizer: binary, query_encoding: binary}
+  - {name: binary1_scalar8, quantizer: binary, query_encoding: scalar8bits}
+  - {name: binary2, quantizer: binary, encoding: two_bits}
   - {name: product8, quantizer: product, compression: x8}
   - {name: product16, quantizer: product, compression: x16}
   - {name: turbo4, quantizer: turbo, bits: 4}
   - {name: turbo2, quantizer: turbo, bits: 2}
+  - {name: turbo1_5, quantizer: turbo, bits: 1.5}
   - {name: turbo1, quantizer: turbo, bits: 1}
   - {name: datatype_turbo4, datatype: turbo4, quantizer: none}
   - {name: datatype_turbo4_turbo1, datatype: turbo4, quantizer: turbo, bits: 1}

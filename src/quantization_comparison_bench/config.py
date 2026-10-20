@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class Settings(BaseModel):
@@ -23,13 +23,21 @@ class Method(Settings):
     name: str = Field(pattern=r"^[a-z0-9_]+$")
     datatype: Literal["float32", "turbo4"] = "float32"
     quantizer: Literal["none", "scalar", "binary", "product", "turbo"] = "none"
-    bits: Literal[1, 2, 4] | None = None
+    bits: Literal["1", "1.5", "2", "4"] | None = None
     compression: Literal["x8", "x16"] | None = None
     quantile: float = Field(default=0.99, ge=0.5, le=1)
-    query_encoding: Literal["binary", "scalar4bits", "scalar8bits"] = "binary"
+    encoding: Literal["one_bit", "one_and_half_bits", "two_bits"] = "one_bit"
+    query_encoding: Literal["binary", "scalar4bits", "scalar8bits"] | None = None
     # Frozen development-selected points written by `qbench select`. When set,
     # they replace the search grid for this method.
     cells: list[Cell] | None = Field(default=None, min_length=1)
+
+    @field_validator("bits", mode="before")
+    @classmethod
+    def coerce_bits(cls, value: object) -> object:
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return str(int(value)) if float(value).is_integer() else str(value)
+        return value
 
     @model_validator(mode="after")
     def check_parameters(self) -> Self:
@@ -61,19 +69,17 @@ class Method(Settings):
                     }
                 }
             case "binary":
-                return {
-                    "binary": {
-                        "encoding": "one_bit",
-                        "query_encoding": self.query_encoding,
-                        "memory": "pinned",
-                    }
-                }
+                binary: dict[str, Any] = {"encoding": self.encoding, "memory": "pinned"}
+                if self.query_encoding is not None:
+                    binary["query_encoding"] = self.query_encoding
+                return {"binary": binary}
             case "product":
                 return {
                     "product": {"compression": self.compression, "memory": "pinned"}
                 }
             case "turbo":
-                return {"turbo": {"bits": f"bits{self.bits}", "memory": "pinned"}}
+                bits = {"1": "bits1", "1.5": "bits1_5", "2": "bits2", "4": "bits4"}
+                return {"turbo": {"bits": bits[str(self.bits)], "memory": "pinned"}}
 
 
 class Hnsw(Settings):

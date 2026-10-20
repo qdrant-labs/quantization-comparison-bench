@@ -86,3 +86,26 @@ def test_save_and_reload_round_trip(tmp_path: Path) -> None:
     config = load_config(Path("configs/benchmark.yaml"))
     save_config(tmp_path / "copy.yaml", config)
     assert load_config(tmp_path / "copy.yaml") == config
+
+
+def test_extended_encodings_map_to_server_names() -> None:
+    assert Method(name="t", quantizer="turbo", bits=1.5).quantization() == {
+        "turbo": {"bits": "bits1_5", "memory": "pinned"}
+    }
+    assert Method(name="t", quantizer="turbo", bits=4).quantization() == {
+        "turbo": {"bits": "bits4", "memory": "pinned"}
+    }
+    assert Method(name="b", quantizer="binary", encoding="two_bits").quantization() == {
+        "binary": {"encoding": "two_bits", "memory": "pinned"}
+    }
+    assert Method(
+        name="b", quantizer="binary", query_encoding="scalar8bits"
+    ).quantization() == {
+        "binary": {
+            "encoding": "one_bit",
+            "memory": "pinned",
+            "query_encoding": "scalar8bits",
+        }
+    }
+    with pytest.raises(ValidationError):
+        Method(name="t", quantizer="turbo", bits=3)

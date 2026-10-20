@@ -24,6 +24,14 @@ For the final analysis, pair each method's quality observations with its baselin
 
 ## Resource and latency interpretation
 
+Three memory views are recorded on purpose, and they answer different questions:
+
+- **Allocator heap** (`server-memory-*.json`, `footprint.json`): Qdrant's jemalloc gauges from `/metrics`, with deltas from the pre-index snapshot to after indexing and after search. This is the `heap_mb` figure of the modern-quantization-bench reference. It excludes memory-mapped file pages, so pages read back for rescoring are not in it.
+- **Process RSS** with its anonymous/file-backed split (`memory-*.json`, `resources.jsonl`): what the process actually holds, including mapped original vectors that were touched.
+- **Cgroup current/peak** and `memory.stat`: what the container is charged for, including page cache. This is what a deployment needs in RAM.
+
+Per-query hardware usage comes from the query response when the server runs with `QDRANT__SERVICE__HARDWARE_REPORTING=true` (the Compose file sets it): `cpu`, `vector_io_read`, `payload_io_read`, and `payload_index_io_read` are stored on every record and averaged per group as `mean_*_per_query`. `vector_io_read` is non-zero only when cold vectors are read from disk, which is how rescoring reads show up. The units are Qdrant's own; compare configurations with each other. `passes.jsonl` also holds the cumulative per-collection counters before and after every pass.
+
 Report server processing time and client wall-clock time separately. Record protocol, client location, concurrency, result limit, and whether vectors or payloads were returned. Embedding generation and collection construction are not search latency.
 
 Keep warm, cold-start, and controlled cold-request results separate. Cold-start records carry `cache_state: cold_start` and a per-query `position` within the pass; the first queries after a reset are the cold ones. Restarting a process does not clear the OS page cache. Only label a run controlled cold when the cache-reset procedure and disk/page-fault counters support that claim. Managed environments without cache control can report observed conditions.

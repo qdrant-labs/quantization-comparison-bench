@@ -11,4 +11,6 @@ services:
     memswap_limit: ${QDRANT_MEMORY_LIMIT:-28g}
     environment:
       QDRANT__TELEMETRY_DISABLED: "true"
+      # Per-collection CPU and vector I/O counters in /metrics and per-query usage.
+      QDRANT__SERVICE__HARDWARE_REPORTING: "true"
     stop_grace_period: 1m

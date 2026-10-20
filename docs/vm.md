@@ -66,6 +66,11 @@ cgroup's `memory.max`.
 
 ## Resource measurements
 
+The Compose service starts Qdrant with `QDRANT__SERVICE__HARDWARE_REPORTING=true`
+so every query response carries CPU and vector I/O counters and `/metrics`
+exposes per-collection hardware counters. Configurations with
+`require_telemetry: true` fail if the counters are absent.
+
 Each method/build directory contains `memory-pre-index.json`,
 `memory-post-index.json`, `memory-post-search.json`, `resources.jsonl` sampled
 every 100 ms, `storage.json` taken while the collection exists after indexing,
