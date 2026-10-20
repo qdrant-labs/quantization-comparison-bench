@@ -57,6 +57,7 @@ for pair in "scifact cohere" "scifact bge" "nfcorpus cohere" "nfcorpus bge"; do
 done
 
 log "step 2: stage fiqa and quora with BGE"
+uv sync --locked --extra bge
 uv run qbench prepare-all --with-bge
 uv run qbench readiness --require-all
 
