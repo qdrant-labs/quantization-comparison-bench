@@ -112,7 +112,8 @@ vector I/O usage, `summary.json`, and per build/method directories with the
 collection configuration, storage breakdown, allocator heap deltas
 (`footprint.json`), host memory snapshots before and after indexing and
 search, Prometheus metrics, 100 ms resource samples, and per-pass I/O and
-page-fault counters. How to read them:
+page-fault counters. `uv run qbench report` turns completed runs into the
+article tables with bootstrap intervals. How to read them:
 [results](docs/results.md).
 
 Turbo8 is excluded until a release with verified server and client support

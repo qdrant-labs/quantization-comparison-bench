@@ -32,10 +32,29 @@ Three memory views are recorded on purpose, and they answer different questions:
 
 Per-query hardware usage comes from the query response when the server runs with `QDRANT__SERVICE__HARDWARE_REPORTING=true` (the Compose file sets it): `cpu`, `vector_io_read`, `payload_io_read`, and `payload_index_io_read` are stored on every record and averaged per group as `mean_*_per_query`. `vector_io_read` is non-zero only when cold vectors are read from disk, which is how rescoring reads show up. The units are Qdrant's own; compare configurations with each other. `passes.jsonl` also holds the cumulative per-collection counters before and after every pass.
 
-Report server processing time and client wall-clock time separately. Record protocol, client location, concurrency, result limit, and whether vectors or payloads were returned. Embedding generation and collection construction are not search latency.
+Report server processing time and client wall-clock time separately. The timed query path uses a minimal keep-alive HTTP/1.1 connection (`transport.py`) rather than httpx: on Linux loopback httpx added about a millisecond per request and a 40 ms delayed-ACK stall for responses of a few kilobytes, which would have dominated the client figure. The manifest records the transport. Record protocol, client location, concurrency, result limit, and whether vectors or payloads were returned. Embedding generation and collection construction are not search latency.
 
 Keep warm, cold-start, and controlled cold-request results separate. Cold-start records carry `cache_state: cold_start` and a per-query `position` within the pass; the first queries after a reset are the cold ones. Restarting a process does not clear the OS page cache. Only label a run controlled cold when the cache-reset procedure and disk/page-fault counters support that claim. Managed environments without cache control can report observed conditions.
 
 Use process RSS and container memory counters as separate measurements; they overlap and must not be summed. Record anonymous and file-backed memory where available, build peaks separately from search peaks, and rescoring's page reads. A before/after snapshot is not a peak measurement; use the container's peak counter or a sampled time series. Report collection disk usage including originals, quantized copies, HNSW, payload, and WAL, and identify the measurement tool and whether it counts allocated or apparent bytes.
 
 Compare configurations at both fixed requested settings and a development-selected quality target. List failures and quality-target misses. Hardware, memory caps, index settings, cache procedures, embedding checksums, and server/client versions belong beside the results so readers can reproduce the trade-offs.
+
+## Building the tables
+
+```bash
+uv run qbench report --results results --output results/report
+```
+
+`report.md` and `report.json` cover every workload directory with completed
+or failed stages: the primary comparison, the frozen selection with dev and
+held-out numbers side by side, the datatype and ablation runs, cold-start
+head/tail latency, and the memory-pressure outcome. Quality is averaged per
+query over repeats and builds before averaging over queries; the 95% intervals
+are a 2,000-sample bootstrap over query IDs, paired with the exact baseline
+through the per-query ΔnDCG@10. Build variation is shown as the min–max of
+per-build recall. Latency percentiles pool all measured requests. Memory and
+storage rows average across builds and keep the peak for peak counters. Runs
+with a `failed` manifest are listed with their error type and whatever methods
+completed before the failure. The macro-average table at the end gives every
+dataset equal weight and is a secondary summary only.
