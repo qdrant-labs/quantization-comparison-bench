@@ -7,6 +7,7 @@ from quantization_comparison_bench.config import (
     Benchmark,
     Cell,
     Method,
+    collection_config,
     load_config,
     save_config,
 )
@@ -109,3 +110,12 @@ def test_extended_encodings_map_to_server_names() -> None:
     }
     with pytest.raises(ValidationError):
         Method(name="t", quantizer="turbo", bits=3)
+
+
+def test_indexing_threads_are_explicit_and_shared() -> None:
+    config = load_config(Path("configs/benchmark.yaml"))
+    body = collection_config(config, config.methods[0], 16)
+    assert body["hnsw_config"]["max_indexing_threads"] == 8
+    for path in CONFIGS:
+        if path.stem != "smoke":
+            assert load_config(path).hnsw.max_indexing_threads == 8, path

@@ -87,7 +87,8 @@ and skips any stage that already completed:
 | `datatype` | `configs/datatype.yaml` | `turbo4` stored datatype versus float32 plus TurboQuant search copies |
 | `ablation` | `configs/ablation.yaml` | Fixed-effort rescoring/oversampling ablation plus the extended set: binary 1.5/2-bit, scalar-8 query encoding, TurboQuant 2/1.5/1-bit, product16 |
 
-Repeat for `scifact`, `nfcorpus`, `quora` and for `bge`. The two extra
+Repeat for `scifact`, `nfcorpus`, `quora` and for `bge`, or run every step in
+order with `scripts/run-all.sh` inside tmux. The two extra
 experiments are separate because they change the host condition:
 
 ```bash

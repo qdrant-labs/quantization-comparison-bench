@@ -85,6 +85,9 @@ class Method(Settings):
 class Hnsw(Settings):
     m: int = Field(default=16, ge=4)
     ef_construct: int = Field(default=100, ge=16)
+    # Threads for index construction. Affects build time and build-time CPU,
+    # not search results; keep it identical across every reported run.
+    max_indexing_threads: int = Field(default=8, ge=1)
 
 
 class Search(Settings):
@@ -123,7 +126,7 @@ class Benchmark(Settings):
     models: list[str] = Field(default_factory=lambda: ["cohere", "bge"])
     builds: int = Field(default=3, ge=1)
     seed: int = 42
-    upload_batch_size: int = Field(default=256, ge=1)
+    upload_batch_size: int = Field(default=1024, ge=1)
     indexing_timeout_seconds: float = Field(default=7200, gt=0)
     hnsw: Hnsw = Field(default_factory=Hnsw)
     search: Search = Field(default_factory=Search)
@@ -206,7 +209,7 @@ def collection_config(
             "m": config.hnsw.m,
             "ef_construct": config.hnsw.ef_construct,
             "full_scan_threshold": 10,
-            "max_indexing_threads": 1,
+            "max_indexing_threads": config.hnsw.max_indexing_threads,
             "memory": "cached",
         },
         "optimizers_config": {

@@ -12,6 +12,8 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+import numpy as np
+import orjson
 
 from .config import Benchmark, Cell, Method, collection_config
 from .evaluation import (
@@ -90,7 +92,17 @@ def connect() -> httpx.AsyncClient:
 async def request(
     client: httpx.AsyncClient, verb: str, path: str, body: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    response = await client.request(verb, path, json=body)
+    content = (
+        orjson.dumps(body, option=orjson.OPT_SERIALIZE_NUMPY)
+        if body is not None
+        else None
+    )
+    response = await client.request(
+        verb,
+        path,
+        content=content,
+        headers={"content-type": "application/json"} if content is not None else None,
+    )
     if response.is_error:
         raise RuntimeError(
             f"Qdrant {verb} {path}: HTTP {response.status_code}: {response.text[:1000]}"
@@ -170,7 +182,7 @@ async def create_collection(
             {
                 "batch": {
                     "ids": list(range(start, end)),
-                    "vectors": data.corpus[start:end].tolist(),
+                    "vectors": np.ascontiguousarray(data.corpus[start:end]),
                 },
             },
         )
@@ -199,7 +211,7 @@ async def query(
             "oversampling": cell.oversampling,
         }
     body: dict[str, Any] = {
-        "query": data.queries[row].tolist(),
+        "query": np.ascontiguousarray(data.queries[row]),
         "limit": cell.k,
         "with_payload": False,
         "with_vector": False,
