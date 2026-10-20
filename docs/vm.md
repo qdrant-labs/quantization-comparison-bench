@@ -47,7 +47,9 @@ through a comparison.
 source scripts/vm-env.sh            # from the repository root, container running
 ```
 
-The script resolves the container ID, its process ID, its cgroup v2 path, and
+The script resolves the container ID, the `qdrant` process ID inside it (the
+image entrypoint is a shell wrapper, which is not the process to measure), its
+cgroup v2 path, and
 the storage bind mount, exports `QDRANT_CONTAINER_ID`, `QDRANT_PID`,
 `QDRANT_CGROUP_PATH`, and `QDRANT_STORAGE_PATH`, and checks that this account
 can read `/proc/<pid>/status`, `/proc/<pid>/io`, `/proc/<pid>/stat`, the cgroup

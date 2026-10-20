@@ -46,3 +46,35 @@ def test_summary_reports_hardware_means_or_none() -> None:
     assert group["mean_cpu_per_query"] == 20.0
     assert group["mean_vector_io_read_per_query"] == 200.0
     assert group["mean_payload_io_read_per_query"] is None
+
+
+def test_qdrant_process_skips_the_entrypoint_shell(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    from quantization_comparison_bench import telemetry
+
+    proc = tmp_path / "proc"
+    for pid, comm in (("10", "bash"), ("11", "qdrant")):
+        (proc / pid).mkdir(parents=True)
+        (proc / pid / "comm").write_text(comm + "\n")
+    cgroup = tmp_path / "cgroup"
+    cgroup.mkdir()
+    (cgroup / "cgroup.procs").write_text("10\n11\n")
+    real_path = telemetry.Path
+
+    def fake_path(*parts):
+        path = real_path(*parts)
+        return (
+            proc / path.relative_to("/proc") if str(path).startswith("/proc") else path
+        )
+
+    monkeypatch.setattr(telemetry, "Path", fake_path)
+    assert telemetry.qdrant_process(cgroup) == "11"
+    (cgroup / "cgroup.procs").write_text("10\n")
+    try:
+        telemetry.qdrant_process(cgroup)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected RuntimeError without a qdrant process")
+    assert Path  # keep import used
