@@ -46,7 +46,9 @@ disk, kernel, thread counts, and swap are recorded. The normal container cap is
 ## Comparison and selection
 
 Exact float32 neighbors are computed independently of Qdrant; float32 HNSW is
-the approximate baseline. HNSW `m=16` and `ef_construct=100` are fixed.
+the approximate baseline. HNSW `m=16` and `ef_construct=100` are fixed, with eight indexing threads for
+every reported run (build time and build-time CPU depend on it; search results
+do not).
 
 **Primary comparison** (`configs/benchmark.yaml`): scalar8 (int8, quantile
 0.99), binary1 (one-bit storage, binary query encoding), product8, and
