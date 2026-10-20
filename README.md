@@ -85,6 +85,7 @@ and skips any stage that already completed:
 | `select` | `qbench select` | Per method and k, the fastest dev point with ANN Recall@k ≥ 0.95 and nDCG@10 within 0.01 of exact float32; frozen to `selected.yaml` before any test query is read |
 | `selected` | `selected.yaml` | Held-out evaluation of the frozen points; misses are reported, never retuned |
 | `datatype` | `configs/datatype.yaml` | `turbo4` stored datatype versus float32 plus TurboQuant search copies |
+| `datatype-binary` | `configs/datatype-binary.yaml` | Binary retrieval rescored against `turbo4` storage versus against float32 originals |
 | `ablation` | `configs/ablation.yaml` | Fixed-effort rescoring/oversampling ablation plus the extended set: binary 1.5/2-bit, scalar-8 query encoding, TurboQuant 2/1.5/1-bit, product16 |
 
 Repeat for `scifact`, `nfcorpus`, `quora` and for `bge`, or run every step in

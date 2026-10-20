@@ -9,6 +9,7 @@
 #   select    freeze the fastest eligible point per method and k
 #   selected  held-out test evaluation of the frozen settings
 #   datatype  turbo4 stored-datatype comparison (configs/datatype.yaml)
+#   datatype-binary  binary retrieval rescored against turbo4 storage
 #   ablation  fixed-effort rescoring/oversampling ablation (configs/ablation.yaml)
 #
 # Source scripts/vm-env.sh first so telemetry targets are exported.
@@ -57,5 +58,6 @@ if [ ! -f "$out/selected.yaml" ]; then
 fi
 run_stage selected "$out/selected.yaml"
 run_stage datatype configs/datatype.yaml
+run_stage datatype-binary configs/datatype-binary.yaml
 run_stage ablation configs/ablation.yaml
 echo "[$dataset/$model] workload complete under $out"

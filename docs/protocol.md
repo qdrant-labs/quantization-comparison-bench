@@ -70,7 +70,10 @@ modern-quantization-bench reference: binary 1.5-bit and 2-bit encodings, binary
 1-bit with an 8-bit scalar query, TurboQuant bits2, bits1_5, bits1, and
 product16. `configs/datatype.yaml` compares float32 without
 quantization, float32 plus TurboQuant bits4 with and without rescoring, the
-`turbo4` datatype without a search copy, and the bits1 pairing. Rescoring
+`turbo4` datatype without a search copy, and the bits1 pairing.
+`configs/datatype-binary.yaml` adds binary retrieval rescored against `turbo4`
+storage next to binary retrieval rescored against float32 originals, plus a
+`turbo4` search copy over `turbo4` storage, at oversampling 2 and 8. Rescoring
 against `turbo4` storage cannot restore float32 precision, and changing the
 stored datatype can affect index construction.
 
