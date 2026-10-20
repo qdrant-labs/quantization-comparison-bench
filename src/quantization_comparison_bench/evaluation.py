@@ -53,7 +53,10 @@ def _top_positions(
 
 
 def exact_ground_truth(
-    data: EmbeddingData, k: int = 100, block_size: int = 4096
+    data: EmbeddingData,
+    k: int = 100,
+    block_size: int = 4096,
+    selected_query_ids: list[str] | None = None,
 ) -> dict[str, list[str]]:
     """Rank float32 dot products; break ties by corpus row and exclude self IDs."""
     if k < 1 or block_size < 1:
@@ -61,10 +64,21 @@ def exact_ground_truth(
     if data.corpus.shape[1] != data.queries.shape[1]:
         raise ValueError("Corpus and query dimensions differ")
     corpus_positions = {doc_id: row for row, doc_id in enumerate(data.corpus_ids)}
+    wanted = (
+        set(selected_query_ids)
+        if selected_query_ids is not None
+        else set(data.query_ids)
+    )
+    if not wanted.issubset(data.query_ids):
+        raise ValueError("Ground-truth selection includes unknown query IDs")
+    selected_rows = [
+        row for row, query_id in enumerate(data.query_ids) if query_id in wanted
+    ]
     rankings: dict[str, list[str]] = {}
-    for query_start in range(0, len(data.query_ids), 32):
-        query_ids = data.query_ids[query_start : query_start + 32]
-        queries = data.queries[query_start : query_start + 32]
+    for query_start in range(0, len(selected_rows), 32):
+        rows = selected_rows[query_start : query_start + 32]
+        query_ids = [data.query_ids[row] for row in rows]
+        queries = data.queries[rows]
         best_scores = [np.empty(0, dtype=np.float32) for _ in query_ids]
         best_indices = [np.empty(0, dtype=np.int64) for _ in query_ids]
         for start in range(0, len(data.corpus_ids), block_size):
@@ -90,12 +104,17 @@ def quality_metric(
     exact_ids: list[str],
     relevance: dict[str, int],
     k: int,
+    query_id: str | None = None,
 ) -> tuple[float, float]:
     """Return ANN recall at k and nDCG at 10 using linear relevance gains."""
     if k < 1:
         raise ValueError("k must be positive")
     if len(result_ids) != len(set(result_ids)):
         raise ValueError("Search results contain duplicate document IDs")
+    if query_id is not None:
+        relevance = {
+            doc_id: grade for doc_id, grade in relevance.items() if doc_id != query_id
+        }
     exact = set(exact_ids[:k])
     if not exact:
         raise ValueError("ANN recall requires at least one exact neighbor")
@@ -120,6 +139,7 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         "cache_state",
         "rescore",
         "oversampling",
+        "hnsw_ef",
         "build",
     )
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
@@ -150,7 +170,68 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
                 summary[f"{metric}_p50"] = float(np.percentile(values, 50))
                 summary[f"{metric}_p95"] = float(np.percentile(values, 95))
         summaries.append(summary)
-    return {"groups": summaries}
+    return {
+        "groups": summaries,
+        "paired_quality": paired_quality(records),
+        "confidence_interval": (
+            "Approximate 95% normal intervals over per-query paired differences "
+            "from exact float32; repeats and builds are averaged within query. "
+            "Build variation is reported separately in groups."
+        ),
+    }
+
+
+def paired_quality(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fields = (
+        "dataset",
+        "model",
+        "config",
+        "split",
+        "k",
+        "cache_state",
+        "rescore",
+        "oversampling",
+        "hnsw_ef",
+    )
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        groups[tuple(record.get(field) for field in fields)].append(record)
+    output: list[dict[str, Any]] = []
+    for key, rows in groups.items():
+        by_query: dict[str, list[float]] = defaultdict(list)
+        by_build: dict[int, dict[str, list[float]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        for row in rows:
+            delta = float(row["delta_ndcg_at_10"])
+            by_query[row["query_id"]].append(delta)
+            by_build[row["build"]][row["query_id"]].append(delta)
+        values = np.array([np.mean(value) for value in by_query.values()])
+        mean = float(np.mean(values))
+        half_width = (
+            1.96 * float(np.std(values, ddof=1)) / len(values) ** 0.5
+            if len(values) > 1
+            else None
+        )
+        output.append(
+            {
+                **dict(zip(fields, key, strict=True)),
+                "queries": len(values),
+                "mean_delta_ndcg_at_10": mean,
+                "delta_ndcg_at_10_ci95": (
+                    [mean - half_width, mean + half_width]
+                    if half_width is not None
+                    else None
+                ),
+                "build_mean_delta_ndcg_at_10": {
+                    str(build): float(
+                        np.mean([np.mean(repeats) for repeats in queries.values()])
+                    )
+                    for build, queries in sorted(by_build.items())
+                },
+            }
+        )
+    return output
 
 
 def _check_vectors(vectors: NDArray[np.float32], ids: list[str], label: str) -> None:
@@ -178,6 +259,24 @@ def validate_embeddings(data: EmbeddingData) -> None:
     _check_vectors(data.queries, data.query_ids, "queries")
     if data.corpus.shape[1] != data.queries.shape[1]:
         raise ValueError("Corpus and query dimensions differ")
+    if data.manifest.get("schema_version") != 1:
+        raise ValueError("Unsupported embedding manifest schema")
+    if data.manifest.get("dimensions") != data.corpus.shape[1]:
+        raise ValueError("Manifest dimensions do not match saved vectors")
+    if data.manifest.get("dtype") != "float32":
+        raise ValueError("Manifest must declare float32 embeddings")
+    if data.manifest.get("normalization") != "L2":
+        raise ValueError("Manifest must declare L2 normalization")
+    expected_counts = {
+        "documents": len(data.corpus_ids),
+        "queries": len(data.query_ids),
+    }
+    if data.manifest.get("counts") != expected_counts:
+        raise ValueError("Manifest counts do not match saved vectors")
+    if set(data.query_splits) != set(data.query_ids) or set(data.qrels) != set(
+        data.query_ids
+    ):
+        raise ValueError("Split and qrels query IDs must match the saved query IDs")
     corpus_ids = set(data.corpus_ids)
     for query_id in data.query_ids:
         if data.query_splits.get(query_id) not in {"dev", "test"}:
@@ -203,7 +302,9 @@ def verify_fixture(data_dir: Path) -> dict[str, object]:
     for query_id, ranked in exact.items():
         if query_id in ranked:
             raise ValueError(f"Exact search returned a self match for {query_id}")
-        recall, _ = quality_metric(ranked, ranked, data.qrels[query_id], k=100)
+        recall, _ = quality_metric(
+            ranked, ranked, data.qrels[query_id], k=100, query_id=query_id
+        )
         if recall != 1.0:
             raise ValueError(f"Exact search self-recall was not one for {query_id}")
     return {

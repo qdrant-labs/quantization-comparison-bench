@@ -1,0 +1,91 @@
+{
+  "bge_model": "BAAI/bge-small-en-v1.5",
+  "bge_revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+  "dimensions": 1024,
+  "embedding_model": "embed-english-v3.0",
+  "files": {
+    "fiqa/corpus/0000.parquet": {
+      "bytes": 139524713,
+      "sha256": "9b862c5f1d023435f71ebeb8f71942a8caf3b90b1b07b14b435e7a31623c2a52"
+    },
+    "fiqa/qrels/dev.parquet": {
+      "bytes": 16494,
+      "sha256": "8a6d5563dd594f4671377823b39e747ef2be92f4e20991bcbf12865c7cb546ae"
+    },
+    "fiqa/qrels/test.parquet": {
+      "bytes": 21439,
+      "sha256": "048ed9a71a0fbd6f9902355a610f97a314e66dc9bc3a97d8d2254019564d8218"
+    },
+    "fiqa/queries/dev.parquet": {
+      "bytes": 1072124,
+      "sha256": "729e3d1055cf679358d95d0631403ac978c1242d49b145a5e25ad4ce9e91f323"
+    },
+    "fiqa/queries/test.parquet": {
+      "bytes": 1367236,
+      "sha256": "d745fb2470b1d683c7897cef86b1f1ce73741332a9fb9426027556fa07e9d2fa"
+    },
+    "nfcorpus/corpus/0000.parquet": {
+      "bytes": 10283557,
+      "sha256": "34703a489f88e1c0d7328d78b7c274c937cb0e4c807fcbfcb20aee5fe823687b"
+    },
+    "nfcorpus/qrels/dev.parquet": {
+      "bytes": 35925,
+      "sha256": "2e0f196f77ac4bbb6d7cda2c751f181fa91194710cc3c1d3e25a87616403c358"
+    },
+    "nfcorpus/qrels/test.parquet": {
+      "bytes": 36758,
+      "sha256": "b2b3ed43add9eb4d38962fe7d19a396f38f506a6503efce2496e384a7f9bbd40"
+    },
+    "nfcorpus/queries/dev.parquet": {
+      "bytes": 711562,
+      "sha256": "0eb57d19a83d4413eefa4b70facdc6f3b4d3b7fcb68c916caf7c2150d22f6a89"
+    },
+    "nfcorpus/queries/test.parquet": {
+      "bytes": 709281,
+      "sha256": "39e6a8d051752b31e018dfa386b0ef044e748ca8881873009b0a02859f35b636"
+    },
+    "quora/corpus/0000.parquet": {
+      "bytes": 1036066613,
+      "sha256": "5603404937505e58bb89cd2886eb25b8752a54026c80f60084ef47da7203c05a"
+    },
+    "quora/qrels/dev.parquet": {
+      "bytes": 97187,
+      "sha256": "eaa9cf62bb86b6623e930a80d2f149953d7c9ffa9ca72a64fcc8b04fab87695d"
+    },
+    "quora/qrels/test.parquet": {
+      "bytes": 194521,
+      "sha256": "18fe01ff90f3af79274f8734ad6e104150c5f0b0f490fa9d6033468e7692a208"
+    },
+    "quora/queries/dev.parquet": {
+      "bytes": 9939599,
+      "sha256": "aa3da3fd20978438de68d01344c3369e6a1e91f643d9bcbc01aa2ad36fed1c2a"
+    },
+    "quora/queries/test.parquet": {
+      "bytes": 19776643,
+      "sha256": "52f6ad6fddb4b42f90ae78c353857e438ca08a275cad9c2e6158df74748e31a1"
+    },
+    "scifact/corpus/0000.parquet": {
+      "bytes": 14599289,
+      "sha256": "512817f8a81248fa59b81a1abe1593f0581acb1be72b1222d59285566b703f6d"
+    },
+    "scifact/qrels/test.parquet": {
+      "bytes": 7357,
+      "sha256": "6967ff3ea190591928137b98fd9605621b24646196e7c810221fe7de074262cb"
+    },
+    "scifact/qrels/train.parquet": {
+      "bytes": 13183,
+      "sha256": "5c49a4dc07d20e1cc84e5c9d62510098043f234e7ad6197c20994b98640408ee"
+    },
+    "scifact/queries/test.parquet": {
+      "bytes": 675502,
+      "sha256": "50d16b71bdc5154647e73110c922d34883e762f7bc8f72a36ebbedfad5f5d7a1"
+    },
+    "scifact/queries/train.parquet": {
+      "bytes": 1694684,
+      "sha256": "c382375e9deec894d32dbcb1dc7db57bf7b05070c77a94acad2f8b30f322b406"
+    }
+  },
+  "revision": "f018922a46a51388348a307ec2fef28019a33026",
+  "schema_version": 1,
+  "source": "CohereLabs/beir-embed-english-v3"
+}

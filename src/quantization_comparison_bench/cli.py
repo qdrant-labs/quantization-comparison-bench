@@ -9,8 +9,10 @@ import typer
 from .config import load_config
 from .data import create_fixture, embed_dataset, prepare_dataset
 from .evaluation import verify_fixture
+from .preparation import prepare_all as stage_all
+from .preparation import readiness as check_readiness
 from .runner import doctor as check_server
-from .runner import run_benchmark, save_ground_truth
+from .runner import freeze_configuration, run_benchmark, save_ground_truth
 from .runner import summarize as summarize_run
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
@@ -35,9 +37,10 @@ def plan(
             "k": k,
             "rescore": rescore,
             "oversampling": oversampling,
+            "hnsw_ef": hnsw_ef,
         }
         for method in settings.methods
-        for k, rescore, oversampling in settings.grid(method)
+        for k, rescore, oversampling, hnsw_ef in settings.grid(method)
     ]
     display(
         {
@@ -49,7 +52,7 @@ def plan(
             * settings.builds
             * len(settings.datasets)
             * len(settings.models),
-            "cache_state": "warm",
+            "cache_state": settings.search.cache_state,
             "matrix": cells,
         }
     )
@@ -79,17 +82,53 @@ def embed(
     data_root: Annotated[Path, typer.Option()] = Path("data"),
     revision: Annotated[str | None, typer.Option()] = None,
     batch_size: Annotated[int, typer.Option(min=1, max=96)] = 64,
+    device: Annotated[
+        str, typer.Option(help="BGE preparation device: cpu, mps, or cuda")
+    ] = "cpu",
 ) -> None:
-    """Generate/checkpoint embeddings; Cohere calls use your paid API account."""
+    """Import supplied Cohere English-v3 vectors or generate local BGE vectors."""
     if model not in {"cohere", "bge"}:
         raise ValueError("model must be cohere or bge")
     output = data_root / "embeddings" / dataset / model
     if model == "bge" and revision is None:
         revision = BGE_REVISION
     asyncio.run(
-        embed_dataset(data_root / "raw" / dataset, output, model, batch_size, revision)
+        embed_dataset(
+            data_root / "raw" / dataset,
+            output,
+            model,
+            batch_size,
+            revision,
+            device=device,
+        )
     )
     typer.echo(f"Saved embeddings to {output}")
+
+
+@app.command("prepare-all")
+def prepare_all(
+    data_root: Annotated[Path, typer.Option()] = Path("data"),
+    with_bge: Annotated[
+        bool, typer.Option(help="Also compute the four BGE artifacts")
+    ] = False,
+    device: Annotated[str, typer.Option()] = "cpu",
+) -> None:
+    """Stage four English corpora, queries, qrels and precomputed Cohere vectors."""
+    display(asyncio.run(stage_all(data_root, with_bge, device)))
+
+
+@app.command()
+def readiness(
+    data_root: Annotated[Path, typer.Option()] = Path("data"),
+    require_all: Annotated[
+        bool, typer.Option(help="Fail unless both models are prepared")
+    ] = False,
+) -> None:
+    """Verify prepared files, hashes, dimensions, and ID alignment."""
+    report = check_readiness(data_root)
+    display(report)
+    if require_all and not report["all_data_ready"]:
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -133,9 +172,20 @@ def run(
     data: Annotated[Path, typer.Option(exists=True)],
     output: Annotated[Path, typer.Option()],
 ) -> None:
-    """Run one model/dataset artifact through the selected warm-search matrix."""
+    """Run one model/dataset artifact through the configured search matrix."""
     asyncio.run(run_benchmark(load_config(config), data, output))
     typer.echo(f"Completed benchmark. Results: {output / 'summary.json'}")
+
+
+@app.command()
+def freeze(
+    input: Annotated[Path, typer.Option(exists=True)],
+    output: Annotated[Path, typer.Option()],
+    min_recall: Annotated[float, typer.Option(min=0, max=1)] = 0.95,
+    max_ndcg_drop: Annotated[float, typer.Option(min=0, max=1)] = 0.01,
+) -> None:
+    """Choose settings on dev results and write a frozen held-out test config."""
+    display(freeze_configuration(input, output, min_recall, max_ndcg_drop))
 
 
 @app.command()

@@ -3,22 +3,25 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import random
 import re
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime
+from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
+from importlib.resources import files
+from os.path import relpath
 from pathlib import Path
 from typing import Literal, TypedDict, cast
 
-import httpx
 import numpy as np
 from numpy.typing import NDArray
 
 DATASET_SOURCE = "CohereLabs/beir-embed-english-v3"
 BGE_MODEL = "BAAI/bge-small-en-v1.5"
-COHERE_MODEL = "embed-multilingual-v3.0"
+COHERE_MODEL = "embed-english-v3.0"
+DATASET_REVISION = "f018922a46a51388348a307ec2fef28019a33026"
+BGE_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
 BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 SUPPORTED_DATASETS = {"fiqa", "scifact", "nfcorpus", "quora"}
 type FloatArray = NDArray[np.float32]
@@ -55,6 +58,11 @@ class SourceQrel(TypedDict):
     query_id: str
     corpus_id: str
     score: int
+
+
+class EmbeddingBatch(TypedDict):
+    start: int
+    indices: list[int]
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -100,21 +108,62 @@ def _sample[T](rows: list[T], count: int | None, seed: int) -> list[T]:
 
 
 def _source_rows(
-    dataset: str, component: str, split: str, revision: str
+    dataset: str, component: str, split: str, revision: str, cache: Path
 ) -> Iterable[object]:
+    path = _source_file(dataset, component, split, revision, cache)
     try:
-        from datasets import load_dataset  # ty: ignore[unresolved-import]
+        import pyarrow.parquet as parquet
     except ImportError as error:
         raise RuntimeError(
             "Install dataset support with: uv sync --extra datasets"
         ) from error
-    return load_dataset(
-        DATASET_SOURCE,
-        f"{dataset}-{component}",
-        split=split,
-        revision=revision,
-        streaming=True,
-    )
+    source = parquet.ParquetFile(path)
+    columns = [name for name in source.schema_arrow.names if name != "emb"]
+    for batch in source.iter_batches(batch_size=1024, columns=columns):
+        yield from batch.to_pylist()
+
+
+@lru_cache(maxsize=32)
+def _source_file(
+    dataset: str, component: str, split: str, revision: str, cache: Path
+) -> Path:
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as error:
+        raise RuntimeError(
+            "Install dataset support with: uv sync --extra datasets"
+        ) from error
+    if revision != DATASET_REVISION:
+        raise ValueError(
+            f"Source checksums are locked to revision {DATASET_REVISION}; "
+            "update dataset_sources.json before using another revision."
+        )
+    name = f"{dataset}/{component}/{'0000' if component == 'corpus' else split}.parquet"
+    locked = json.loads(
+        files("quantization_comparison_bench")
+        .joinpath("dataset_sources.json")
+        .read_text(encoding="utf-8")
+    )["files"][name]
+    destination = cache / revision / name
+    if not destination.is_file():
+        destination = Path(
+            hf_hub_download(
+                DATASET_SOURCE,
+                name,
+                repo_type="dataset",
+                revision=revision,
+                local_dir=cache / revision,
+            )
+        )
+    if destination.stat().st_size != locked["bytes"]:
+        raise ValueError(
+            f"Source size mismatch; remove and download again: {destination}"
+        )
+    if _checksum(destination) != locked["sha256"]:
+        raise ValueError(
+            f"Source checksum mismatch; remove and download again: {destination}"
+        )
+    return destination
 
 
 def _prepare_queries(
@@ -123,6 +172,7 @@ def _prepare_queries(
     dev_queries: int,
     max_test_queries: int | None,
     seed: int,
+    cache: Path,
 ) -> tuple[list[QueryRow], list[QrelRow]]:
     queries: list[QueryRow] = []
     qrels: list[QrelRow] = []
@@ -132,7 +182,7 @@ def _prepare_queries(
     ]:
         source = cast(
             Iterable[SourceQuery],
-            _source_rows(dataset, "queries", source_split, revision),
+            _source_rows(dataset, "queries", source_split, revision, cache),
         )
         candidates = sorted(
             [
@@ -145,7 +195,8 @@ def _prepare_queries(
         selected_ids = {row["id"] for row in selected}
         queries.extend(selected)
         judgments = cast(
-            Iterable[SourceQrel], _source_rows(dataset, "qrels", source_split, revision)
+            Iterable[SourceQrel],
+            _source_rows(dataset, "qrels", source_split, revision, cache),
         )
         qrels.extend(
             QrelRow(
@@ -199,6 +250,7 @@ def prepare_dataset(
     seed: int = 42,
     max_docs: int | None = None,
     max_test_queries: int | None = None,
+    source_cache: Path | None = None,
 ) -> None:
     """Freeze raw BEIR text, query splits, and original relevance labels."""
     if dataset not in SUPPORTED_DATASETS:
@@ -209,13 +261,14 @@ def prepare_dataset(
     if max_test_queries is not None and max_test_queries < 1:
         raise ValueError("max_test_queries must be positive.")
     destination = output / dataset
+    cache = source_cache or output.parent / "sources"
     if destination.exists() and any(destination.iterdir()):
         raise FileExistsError(f"Use an empty output directory: {destination}")
     queries, qrels = _prepare_queries(
-        dataset, revision, dev_queries, max_test_queries, seed
+        dataset, revision, dev_queries, max_test_queries, seed, cache
     )
     source = cast(
-        Iterable[SourceText], _source_rows(dataset, "corpus", "train", revision)
+        Iterable[SourceText], _source_rows(dataset, "corpus", "train", revision, cache)
     )
     corpus = sorted(
         [
@@ -248,7 +301,8 @@ def prepare_dataset(
             "dataset": dataset,
             "source": DATASET_SOURCE,
             "source_revision": revision,
-            "datasets_version": version("datasets"),
+            "pyarrow_version": version("pyarrow"),
+            "source_cache": relpath(cache.resolve(), destination.resolve()),
             "seed": seed,
             "development_source_split": "train" if dataset == "scifact" else "dev",
             "counts": {
@@ -261,6 +315,7 @@ def prepare_dataset(
             "smoke_subset": max_docs is not None or max_test_queries is not None,
             "serialization": "stripped title + newline + stripped body; omit empty parts",
             "source_embeddings_used": False,
+            "source_embeddings_available": COHERE_MODEL,
             "label_policy": "original integer grades; retain all judgments for selected queries",
             "checksums": {
                 name: _checksum(destination / name)
@@ -282,14 +337,17 @@ def _normalize(values: FloatArray) -> FloatArray:
 
 def _embedding_versions(model: str) -> dict[str, str]:
     packages = (
-        ("numpy", "httpx")
+        ("numpy", "pyarrow")
         if model == "cohere"
         else ("numpy", "sentence-transformers", "transformers", "torch")
     )
     try:
         return {name: version(name) for name in packages}
     except PackageNotFoundError as error:
-        raise RuntimeError("Install BGE support with: uv sync --extra bge") from error
+        extra = "datasets" if model == "cohere" else "bge"
+        raise RuntimeError(
+            f"Install embedding support with: uv sync --extra {extra}"
+        ) from error
 
 
 def _save_array(path: Path, values: FloatArray) -> None:
@@ -299,31 +357,50 @@ def _save_array(path: Path, values: FloatArray) -> None:
     temporary.replace(path)
 
 
-async def _cohere_batch(
-    client: httpx.AsyncClient, texts: list[str], input_type: str
-) -> FloatArray:
-    for attempt in range(5):
-        response = await client.post(
-            "https://api.cohere.com/v2/embed",
-            json={
-                "model": COHERE_MODEL,
-                "texts": texts,
-                "input_type": input_type,
-                "embedding_types": ["float"],
-                "truncate": "END",
-            },
+def _import_cohere(
+    dataset: str,
+    source_revision: str,
+    cache: Path,
+    output: Path,
+    kind: str,
+    rows: list[TextRow],
+    source_splits: list[str],
+) -> None:
+    import pyarrow.parquet as parquet
+
+    positions = {row["id"]: index for index, row in enumerate(rows)}
+    found: set[str] = set()
+    temporary = output / f"{kind}.npy.tmp"
+    combined = np.lib.format.open_memmap(
+        temporary, mode="w+", dtype=np.float32, shape=(len(rows), 1024)
+    )
+    for split in source_splits:
+        path = _source_file(dataset, kind, split, source_revision, cache)
+        source = parquet.ParquetFile(path)
+        for batch in source.iter_batches(batch_size=1024, columns=["_id", "emb"]):
+            ids = [str(value) for value in batch.column("_id").to_pylist()]
+            selected = [index for index, value in enumerate(ids) if value in positions]
+            if not selected:
+                continue
+            embeddings = batch.column("emb").to_pylist()
+            vectors = _normalize(
+                np.asarray([embeddings[index] for index in selected], dtype=np.float32)
+            )
+            if vectors.shape[1] != 1024:
+                raise ValueError("Expected 1024-dimensional source Cohere embeddings.")
+            for source_index, vector in zip(selected, vectors, strict=True):
+                row_id = ids[source_index]
+                if row_id in found:
+                    raise ValueError(f"Duplicate source embedding ID: {row_id}")
+                combined[positions[row_id]] = vector
+                found.add(row_id)
+    if found != set(positions):
+        raise ValueError(
+            f"Source embeddings missing {len(set(positions) - found)} IDs."
         )
-        if response.status_code in {429, 500, 502, 503, 504} and attempt < 4:
-            await asyncio.sleep(min(2 ** (attempt + 1), 30))
-            continue
-        response.raise_for_status()
-        values = _normalize(
-            np.asarray(response.json()["embeddings"]["float"], dtype=np.float32)
-        )
-        if values.shape != (len(texts), 1024):
-            raise ValueError(f"Unexpected Cohere embedding shape: {values.shape}")
-        return values
-    raise RuntimeError("Cohere retry budget exhausted.")
+    combined.flush()
+    del combined
+    temporary.replace(output / f"{kind}.npy")
 
 
 async def _embed_batches(
@@ -336,21 +413,66 @@ async def _embed_batches(
 ) -> None:
     cache = output / "checkpoints" / kind
     cache.mkdir(parents=True, exist_ok=True)
-    batches: list[Path] = []
-    for start in range(0, len(rows), batch_size):
-        batch = rows[start : start + batch_size]
+
+    def checkpoint(start: int, indices: list[int]) -> Path:
+        batch = [rows[index] for index in indices]
         identity = json.dumps(
             {"config": config, "rows": batch}, sort_keys=True, ensure_ascii=False
         )
         key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-        path = cache / f"{start:09d}-{key}.npy"
+        return cache / f"{start:09d}-{key}.npy"
+
+    plan_identity = json.dumps(
+        {
+            "config": config,
+            "batch_size": batch_size,
+            "ids": [row["id"] for row in rows],
+        },
+        sort_keys=True,
+    )
+    plan_key = hashlib.sha256(plan_identity.encode("utf-8")).hexdigest()
+    plan_path = cache / f"batch-plan-{plan_key}.json"
+    if plan_path.exists():
+        plan = cast(
+            list[EmbeddingBatch], json.loads(plan_path.read_text(encoding="utf-8"))
+        )
+        if sorted(index for batch in plan for index in batch["indices"]) != list(
+            range(len(rows))
+        ):
+            raise ValueError(
+                f"Checkpoint batch plan has invalid row alignment: {plan_path}"
+            )
+    else:
+        plan: list[EmbeddingBatch] = []
+        pending: list[int] = []
+        for start in range(0, len(rows), batch_size):
+            indices = list(range(start, min(start + batch_size, len(rows))))
+            path = checkpoint(start, indices)
+            if path.exists():
+                plan.append(EmbeddingBatch(start=start, indices=indices))
+            else:
+                pending.extend(indices)
+        pending.sort(key=lambda index: (-len(rows[index]["text"]), index))
+        for start in range(0, len(pending), batch_size):
+            plan.append(
+                EmbeddingBatch(start=start, indices=pending[start : start + batch_size])
+            )
+        _write_json(plan_path, plan)
+    batches = [
+        (batch["indices"], checkpoint(batch["start"], batch["indices"]))
+        for batch in plan
+    ]
+    for indices, path in batches:
         if not path.exists():
-            values = await encode([row["text"] for row in batch])
+            values = await encode([rows[index]["text"] for index in indices])
             _save_array(path, values)
         values = np.load(path, allow_pickle=False)
-        if values.shape != (len(batch), config["dimensions"]):
+        if values.shape != (len(indices), config["dimensions"]):
             raise ValueError(f"Invalid embedding checkpoint shape in {path}")
-        batches.append(path)
+        if not np.isfinite(values).all() or not np.allclose(
+            np.linalg.norm(values, axis=1), 1, atol=1e-5
+        ):
+            raise ValueError(f"Invalid embedding checkpoint vectors in {path}")
     temporary = output / f"{kind}.npy.tmp"
     combined = np.lib.format.open_memmap(
         temporary,
@@ -358,11 +480,9 @@ async def _embed_batches(
         dtype=np.float32,
         shape=(len(rows), cast(int, config["dimensions"])),
     )
-    offset = 0
-    for path in batches:
+    for indices, path in batches:
         values = np.load(path, allow_pickle=False)
-        combined[offset : offset + len(values)] = values
-        offset += len(values)
+        combined[indices] = values
     combined.flush()
     del combined
     temporary.replace(output / f"{kind}.npy")
@@ -409,12 +529,13 @@ async def embed_dataset(
     batch_size: int = 64,
     revision: str | None = None,
     max_documents: int | None = None,
+    device: str = "cpu",
 ) -> None:
     """Embed frozen data, reusing completed batches with identical inputs and settings."""
     if model not in {"cohere", "bge"}:
         raise ValueError("model must be 'cohere' or 'bge'.")
-    if batch_size < 1 or (model == "cohere" and batch_size > 96):
-        raise ValueError("batch_size must be positive; Cohere allows at most 96 texts.")
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive.")
     if max_documents is not None:
         raise ValueError(
             "Use prepare_dataset(max_docs=...) to preserve query judgments in subsets."
@@ -423,7 +544,7 @@ async def embed_dataset(
         revision = _require_commit(revision)
     elif revision is not None:
         raise ValueError(
-            "Cohere exposes a model ID, not a Hugging Face model revision."
+            "Cohere vectors use the prepared dataset's pinned source revision."
         )
     source_manifest = json.loads(
         (dataset_dir / "manifest.json").read_text(encoding="utf-8")
@@ -431,16 +552,48 @@ async def embed_dataset(
     for name, expected in source_manifest["checksums"].items():
         if _checksum(dataset_dir / name) != expected:
             raise ValueError(f"Prepared data checksum mismatch: {name}")
-    corpus = cast(list[TextRow], _read_jsonl(dataset_dir / "corpus.jsonl"))
-    queries = cast(list[QueryRow], _read_jsonl(dataset_dir / "queries.jsonl"))
-    qrel_rows = cast(list[QrelRow], _read_jsonl(dataset_dir / "qrels.jsonl"))
     dataset = str(source_manifest["dataset"])
-    library_versions = _embedding_versions(model)
-    config: dict[str, object] = {
+    stable_config = {
         "dataset": dataset,
         "model": COHERE_MODEL if model == "cohere" else BGE_MODEL,
         "model_revision": revision,
         "dimensions": 1024 if model == "cohere" else 384,
+        "source_manifest_sha256": _checksum(dataset_dir / "manifest.json"),
+    }
+    completed_manifest = output / "manifest.json"
+    if completed_manifest.exists():
+        from quantization_comparison_bench.evaluation import (
+            load_embeddings,
+            validate_embeddings,
+        )
+
+        completed = json.loads(completed_manifest.read_text(encoding="utf-8"))
+        if any(completed.get(key) != value for key, value in stable_config.items()):
+            raise ValueError(
+                "Completed embeddings use different source data or model settings."
+            )
+        required = {
+            "corpus.npy",
+            "queries.npy",
+            "corpus_ids.json",
+            "query_ids.json",
+            "query_splits.json",
+            "qrels.json",
+        }
+        if set(completed["checksums"]) != required:
+            raise ValueError("Completed embedding manifest has an invalid file list.")
+        if all(
+            (output / name).is_file() and _checksum(output / name) == expected
+            for name, expected in completed["checksums"].items()
+        ):
+            validate_embeddings(load_embeddings(output))
+            return
+    corpus = cast(list[TextRow], _read_jsonl(dataset_dir / "corpus.jsonl"))
+    queries = cast(list[QueryRow], _read_jsonl(dataset_dir / "queries.jsonl"))
+    qrel_rows = cast(list[QrelRow], _read_jsonl(dataset_dir / "qrels.jsonl"))
+    library_versions = _embedding_versions(model)
+    config: dict[str, object] = {
+        **stable_config,
         "corpus_input_type": "search_query"
         if dataset == "quora"
         else "search_document",
@@ -448,12 +601,30 @@ async def embed_dataset(
         "query_instruction": BGE_QUERY_INSTRUCTION
         if model == "bge" and dataset != "quora"
         else "",
-        "truncate": "END" if model == "cohere" else "right, max_seq_length=512",
+        "truncate": "source-precomputed (publisher settings)"
+        if model == "cohere"
+        else "right, max_seq_length=512",
         "normalization": "L2 float32",
-        "source_manifest_sha256": _checksum(dataset_dir / "manifest.json"),
         "library_versions": library_versions,
-        "device": "hosted" if model == "cohere" else "cpu",
+        "device": "precomputed" if model == "cohere" else device,
+        "embedding_source": DATASET_SOURCE if model == "cohere" else BGE_MODEL,
+        "embedding_source_revision": source_manifest["source_revision"]
+        if model == "cohere"
+        else revision,
     }
+    if model == "cohere":
+        config["corpus_input_type"] = (
+            "search_query" if dataset == "quora" else "publisher_precomputed"
+        )
+        config["query_input_type"] = "publisher_precomputed"
+        config["publisher_provenance"] = (
+            f"https://huggingface.co/datasets/{DATASET_SOURCE}/blob/"
+            f"{source_manifest['source_revision']}/README.md"
+        )
+        config["publisher_preprocessing"] = (
+            "Imported by ID. Publisher documents Quora corpus search_query; "
+            "other input settings and exact serialization were not reconstructed."
+        )
     output.mkdir(parents=True, exist_ok=True)
     config_path = output / "embedding-config.json"
     if config_path.exists():
@@ -468,52 +639,41 @@ async def embed_dataset(
                 "Embedding output must be empty or have a matching embedding-config.json."
             )
         _write_json(config_path, config)
-    completed_manifest = output / "manifest.json"
-    if completed_manifest.exists():
-        completed = json.loads(completed_manifest.read_text(encoding="utf-8"))
-        if all(
-            (output / name).is_file() and _checksum(output / name) == expected
-            for name, expected in completed["checksums"].items()
-        ):
-            return
     if model == "cohere":
-        key = os.environ.get("COHERE_API_KEY")
-        if not key:
-            raise ValueError(
-                "Set COHERE_API_KEY before running paid Cohere embedding requests."
-            )
-        async with httpx.AsyncClient(
-            headers={"Authorization": f"Bearer {key}"}, timeout=120
-        ) as client:
-
-            async def encode_corpus(texts: list[str]) -> FloatArray:
-                return await _cohere_batch(
-                    client, texts, str(config["corpus_input_type"])
-                )
-
-            async def encode_queries(texts: list[str]) -> FloatArray:
-                return await _cohere_batch(client, texts, "search_query")
-
-            await _embed_batches(
-                corpus, output, "corpus", config, batch_size, encode_corpus
-            )
-            await _embed_batches(
-                cast(list[TextRow], queries),
-                output,
-                "queries",
-                config,
-                batch_size,
-                encode_queries,
-            )
+        cache = dataset_dir / source_manifest.get("source_cache", "../../sources")
+        await asyncio.to_thread(
+            _import_cohere,
+            dataset,
+            str(source_manifest["source_revision"]),
+            cache,
+            output,
+            "corpus",
+            corpus,
+            ["train"],
+        )
+        await asyncio.to_thread(
+            _import_cohere,
+            dataset,
+            str(source_manifest["source_revision"]),
+            cache,
+            output,
+            "queries",
+            cast(list[TextRow], queries),
+            [str(source_manifest["development_source_split"]), "test"],
+        )
     else:
         try:
-            from sentence_transformers import SentenceTransformer  # ty: ignore[unresolved-import]
+            from sentence_transformers import SentenceTransformer
         except ImportError as error:
             raise RuntimeError(
                 "Install BGE support with: uv sync --extra bge"
             ) from error
         encoder = await asyncio.to_thread(
-            SentenceTransformer, BGE_MODEL, revision=revision, device="cpu"
+            SentenceTransformer,
+            BGE_MODEL,
+            revision=revision,
+            device=device,
+            cache_folder=str(dataset_dir.parent.parent / "models"),
         )
         encoder.float()
         encoder.eval()
@@ -561,6 +721,10 @@ async def embed_dataset(
             "source_manifest": source_manifest,
             "library_versions": library_versions,
             "synthetic": False,
+            "embedding_batch_size": batch_size if model == "bge" else None,
+            "batch_order": "descending text length after retained checkpoints"
+            if model == "bge"
+            else "source order with explicit ID alignment",
         },
     )
 
