@@ -10,6 +10,27 @@ procedure, and install [uv](https://docs.astral.sh/uv/getting-started/installati
 Then follow the README setup. The repository does not provision a VM or change
 its firewall.
 
+## Bring the prepared data
+
+The measurement VM needs no GPU. Prepare BGE before timing Qdrant. Transfer the
+prepared `data/raw`, `data/embeddings`, `data/sources`, and `data/models` directories
+to the checkout, preserving their relative paths. Vector arrays are portable
+float32 `.npy` files; an MPS-prepared BGE artifact can be measured on Linux CPUs
+without re-embedding it. Its manifest retains the original preparation device.
+
+If using the prepared data archive, extract it from the repository root, then
+check the entire matrix:
+
+```bash
+tar -xf /path/to/quantization-vm-data.tar
+uv sync --locked
+uv run qbench readiness --require-all
+```
+
+If preparing from scratch instead, use `uv sync --locked --extra datasets --extra
+bge` followed by `uv run qbench prepare-all --with-bge`. Keep downloads and
+embedding inference outside measured search intervals.
+
 ## Connectivity
 
 Compose publishes REST port 6333 and gRPC port 6334 on `127.0.0.1` only. The local
@@ -54,7 +75,8 @@ git rev-parse HEAD > results/environment/repository-commit.txt
 Record whether swap is enabled, CPU frequency policy, CPU instruction support,
 container CPU restrictions, and any provider-level disk limits. The default
 Compose memory cap is 28 GiB, leaving room for the OS and client on a 32 GiB VM;
-it is not a memory-pressure experiment by itself.
+it is not a memory-pressure experiment by itself. Compose also fixes the CPU
+limit at eight and disables container swap by setting memory+swap equal to RAM.
 
 Build embeddings before timing Qdrant. BGE inference and large array operations
 can otherwise compete for CPU and RAM with the server. Keep only one measured
@@ -79,9 +101,7 @@ The runner can sample the host paths when these variables are exported. On a
 Linux host using cgroup v2, obtain the process and cgroup path from Docker:
 
 ```bash
-export QDRANT_PID="$(docker inspect --format '{{.State.Pid}}' "$(docker compose ps -q qdrant)")"
-export QDRANT_CGROUP_PATH="/sys/fs/cgroup$(awk -F: '$1 == "0" {print $3}' "/proc/$QDRANT_PID/cgroup")"
-export QDRANT_STORAGE_PATH="$PWD/data/qdrant"
+source scripts/vm-env.sh
 ```
 
 Confirm the selected paths are readable by the benchmark account before the
@@ -89,6 +109,11 @@ run, including `/proc/$QDRANT_PID/io` and collection files. Docker rootless or
 nonstandard cgroup layouts may need different host paths. The script does not
 escalate permissions automatically. Re-resolve paths after restarting the
 container; process IDs and cgroup paths can change.
+If `/proc/$QDRANT_PID/io` or the bind-mounted files are root-owned, run the
+benchmark from a root shell with the existing tool PATH, for example
+`sudo env "PATH=$PATH" bash scripts/run-workload.sh scifact cohere`.
+The script records the environment before running. Keep the same execution user
+for subsequent measured runs and result processing.
 
 Resource samples are recorded every 100 ms across indexing and query measurements. Cgroup
 `memory.peak` and process high-water marks are cumulative; they do not become
@@ -111,28 +136,45 @@ snapshot before cleanup; classify files into those categories during analysis.
 
 ## Warm, cold, and memory-pressure runs
 
-The initial CLI benchmark is a warm-cache workflow. It does not claim controlled
-cold results, and it does not drop host caches. For a cold experiment, design a
-dedicated-host procedure that resets the intended file cache, restores intended
-pinned structures, and checks actual disk reads/page faults. A restarted Qdrant
-process can read already-cached filesystem pages.
+The primary configuration is warm-cache. `configs/cold-start.yaml` explicitly
+runs `scripts/cold-cache.sh` before each timed pass, with no warm-up. The pass
+gradually warms as requests proceed; it is not a series of independently cold
+queries. The hook uses `sync` and the Linux cache-drop interface, so use it only
+on this dedicated VM. It requires passwordless execution of the cache-drop
+command (or a root benchmark shell) and explicit acknowledgement:
 
-Before adding a cold-cache procedure, verify it cannot affect other services on
-the VM. Keep independently cold requests separate from a cold-start pass that
-warms with each query. Record exact operations and resulting I/O counters.
+```bash
+export QBENCH_DEDICATED_VM=1
+source scripts/vm-env.sh
+uv run qbench run --config configs/cold-start.yaml --data data/embeddings/quora/cohere --output results/quora-cohere-cold-start
+```
 
-For the separate memory-pressure experiment, select one fixed cap per model in
-preflight. Edit `QDRANT_MEMORY_LIMIT` in `.env`, recreate the container, and record
-the effective limit:
+Inspect `cache-resets.jsonl`, `measurement-intervals.jsonl`, process reads and
+major faults before interpreting cache effects. Successful reset command exit
+alone does not prove physical disk reads for every request.
+
+For the separate pressure run, set `QDRANT_MEMORY_LIMIT=1g` in `.env` and recreate
+the service. Quora/Cohere originals occupy 2,141,925,376 bytes, so a 1 GiB cgroup
+cap is below the original-vector footprint. Keep this cap fixed across methods.
 
 ```bash
 docker compose up -d --force-recreate
 docker inspect --format '{{.HostConfig.Memory}}' "$(docker compose ps -q qdrant)"
+source scripts/vm-env.sh
+uv run qbench doctor
+uv run qbench run --config configs/memory-pressure.yaml --data data/embeddings/quora/cohere --output results/quora-cohere-pressure-1g
 ```
 
-Wait for readiness again before running. Keep the cap the same across methods,
-and report OOMs, timeouts, and index-build failures. Do not lower the cap for one
-method until it looks faster than another.
+Wait for readiness after recreation. The runner checks the actual cgroup cap and
+requires readable resource telemetry; it refuses to label an unconstrained run
+as pressure. A BGE pressure run needs a separately preregistered cap below its
+803,222,016-byte originals; 1 GiB would fail this check.
+
+Report OOMs, timeouts and build failures. Failure aborts the current run and saves
+its error; it does not imply that the remaining methods ran. Recover the server,
+inspect any leftover experiment collection, and explicitly schedule unmeasured
+methods at the same cap. Restore `QDRANT_MEMORY_LIMIT=28g`, recreate and re-source
+the environment before later normal runs.
 
 ## Shutdown
 
@@ -144,3 +186,4 @@ This preserves storage and experiment output. `docker compose down` removes the
 container and network while preserving the bind-mounted directory. Deleting
 `data/qdrant/` removes the stored collections; use a dedicated experiment server
 and preserve required outputs before deliberate cleanup.
+

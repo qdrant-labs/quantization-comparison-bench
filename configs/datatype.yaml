@@ -1,8 +1,14 @@
 expected_qdrant_version: "1.19.2"
 builds: 3
+search:
+  ks: [10, 100]
+  rescoring: [false, true]
+  oversampling: [2]
+  max_queries: 150
 methods:
   - {name: float32, quantizer: none}
   - {name: float32_turbo4, quantizer: turbo, bits: 4}
   - {name: datatype_turbo4, datatype: turbo4, quantizer: none}
   - {name: float32_turbo1, quantizer: turbo, bits: 1}
   - {name: datatype_turbo4_turbo1, datatype: turbo4, quantizer: turbo, bits: 1}
+

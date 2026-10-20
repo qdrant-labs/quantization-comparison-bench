@@ -8,14 +8,14 @@ search:
   rescoring: [false, true]
   oversampling: [1, 2, 4, 8]
   split: dev
+  hnsw_efs: [64, 128, 256, 512]
   warmup_queries: 50
   repeats: 1
+  max_queries: 50
 methods:
   - {name: float32, quantizer: none}
   - {name: scalar8, quantizer: scalar, quantile: 0.99}
   - {name: binary1, quantizer: binary, query_encoding: binary}
   - {name: product8, quantizer: product, compression: x8}
-  - {name: product16, quantizer: product, compression: x16}
   - {name: turbo4, quantizer: turbo, bits: 4}
-  - {name: turbo2, quantizer: turbo, bits: 2}
-  - {name: turbo1, quantizer: turbo, bits: 1}
+

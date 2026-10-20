@@ -1,0 +1,21 @@
+expected_qdrant_version: "1.19.2"
+datasets: [quora]
+models: [cohere, bge]
+builds: 3
+seed: 42
+require_telemetry: true
+search:
+  ks: [10, 100]
+  rescoring: [true]
+  oversampling: [2]
+  split: test
+  repeats: 5
+  max_queries: 150
+  cache_state: cold_start
+  cache_reset_command: [bash, scripts/cold-cache.sh]
+methods:
+  - {name: float32, quantizer: none}
+  - {name: scalar8, quantizer: scalar, quantile: 0.99}
+  - {name: binary1, quantizer: binary, query_encoding: binary}
+  - {name: product8, quantizer: product, compression: x8}
+  - {name: turbo4, quantizer: turbo, bits: 4}

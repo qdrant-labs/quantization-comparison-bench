@@ -10,6 +10,13 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class OperatingPoint(Settings):
+    k: int = Field(ge=10)
+    hnsw_ef: int = Field(ge=1)
+    rescore: bool | None = None
+    oversampling: float | None = Field(default=None, ge=1)
+
+
 class Method(Settings):
     name: str = Field(pattern=r"^[a-z0-9_]+$")
     datatype: Literal["float32", "turbo4"] = "float32"
@@ -18,6 +25,7 @@ class Method(Settings):
     compression: Literal["x8", "x16"] | None = None
     quantile: float = Field(default=0.99, ge=0.5, le=1)
     query_encoding: Literal["binary", "scalar4bits", "scalar8bits"] = "binary"
+    search_settings: list[OperatingPoint] | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def check_parameters(self) -> Self:
@@ -25,6 +33,12 @@ class Method(Settings):
             raise ValueError("bits must be set exactly when quantizer is turbo")
         if (self.quantizer == "product") != (self.compression is not None):
             raise ValueError("compression must be set exactly for product quantization")
+        for setting in self.search_settings or []:
+            quantized = self.quantizer != "none"
+            if quantized != (setting.rescore is not None):
+                raise ValueError("Frozen rescoring must match the quantizer")
+            if quantized != (setting.oversampling is not None):
+                raise ValueError("Frozen oversampling must match the quantizer")
         return self
 
     def quantization(self) -> dict[str, Any] | None:
@@ -71,6 +85,10 @@ class Search(Settings):
     warmup_queries: int = Field(default=50, ge=1)
     repeats: int = Field(default=5, ge=1)
     max_queries: int | None = Field(default=None, ge=1)
+    hnsw_efs: list[int] | None = Field(default=None, min_length=1)
+    cache_state: Literal["warm", "cold_start"] = "warm"
+    cache_reset_command: list[str] | None = Field(default=None, min_length=1)
+    cache_reset_timeout_seconds: float = Field(default=120, gt=0)
 
     @model_validator(mode="after")
     def check_grid(self) -> Self:
@@ -78,6 +96,10 @@ class Search(Settings):
             raise ValueError("k must be >= 10 to report nDCG@10")
         if any(value < 1 for value in self.oversampling):
             raise ValueError("oversampling must be >= 1")
+        if self.hnsw_efs and any(value < 1 for value in self.hnsw_efs):
+            raise ValueError("hnsw_efs must be positive")
+        if (self.cache_state == "cold_start") != (self.cache_reset_command is not None):
+            raise ValueError("cold_start requires an explicit cache_reset_command")
         return self
 
 
@@ -94,6 +116,9 @@ class Benchmark(Settings):
     hnsw: Hnsw = Field(default_factory=Hnsw)
     search: Search = Field(default_factory=Search)
     methods: list[Method] = Field(min_length=1)
+    memory_pressure: bool = False
+    require_telemetry: bool = False
+    tuning_provenance: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def unique_methods(self) -> Self:
@@ -101,11 +126,19 @@ class Benchmark(Settings):
             raise ValueError("Method names must be unique")
         return self
 
-    def grid(self, method: Method) -> list[tuple[int, bool | None, float | None]]:
+    def grid(self, method: Method) -> list[tuple[int, bool | None, float | None, int]]:
+        if method.search_settings:
+            return [
+                (point.k, point.rescore, point.oversampling, point.hnsw_ef)
+                for point in method.search_settings
+            ]
+        efs = self.search.hnsw_efs or [self.hnsw.hnsw_ef]
         if method.quantizer == "none":
-            return [(k, None, None) for k in self.search.ks]
+            return [(k, None, None, ef) for k, ef in product(self.search.ks, efs)]
         return list(
-            product(self.search.ks, self.search.rescoring, self.search.oversampling)
+            product(
+                self.search.ks, self.search.rescoring, self.search.oversampling, efs
+            )
         )
 
 
