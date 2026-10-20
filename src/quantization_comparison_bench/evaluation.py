@@ -175,6 +175,11 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
             if values:
                 summary[f"{metric}_p50"] = float(np.percentile(values, 50))
                 summary[f"{metric}_p95"] = float(np.percentile(values, 95))
+        for metric in ("cpu", "vector_io_read", "payload_io_read"):
+            values = [float(row[metric]) for row in rows if row.get(metric) is not None]
+            summary[f"mean_{metric}_per_query"] = (
+                float(np.mean(values)) if values else None
+            )
         summaries.append(summary)
     return {"groups": summaries}
 

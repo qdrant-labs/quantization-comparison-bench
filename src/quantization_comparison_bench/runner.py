@@ -28,9 +28,12 @@ from .telemetry import (
     check_telemetry,
     collection_storage,
     host_memory,
+    parse_metrics,
     refresh_targets,
     sample_resources,
 )
+
+HARDWARE_FIELDS = ("cpu", "vector_io_read", "payload_io_read", "payload_index_io_read")
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -95,14 +98,24 @@ async def request(
     return response.json()
 
 
+async def server_metrics(
+    client: httpx.AsyncClient, collection: str | None = None
+) -> tuple[str, dict[str, Any]]:
+    response = await client.get("/metrics")
+    response.raise_for_status()
+    return response.text, parse_metrics(response.text, collection)
+
+
 async def doctor() -> dict[str, Any]:
     async with connect() as client:
         root = await request(client, "GET", "/")
         response = await client.get("/healthz")
         response.raise_for_status()
+        _, metrics = await server_metrics(client)
         return {
             "reachable": True,
             "server": root,
+            "allocator_metrics": bool(metrics["memory"]),
             "host_platform": platform.platform(),
             "cpu_count": os.cpu_count(),
             "telemetry": {
@@ -177,7 +190,7 @@ async def query(
     row: int,
     cell: Cell,
     self_match: int | None,
-) -> tuple[list[str], float, float]:
+) -> tuple[list[str], float, float, dict[str, int] | None]:
     params: dict[str, Any] = {"hnsw_ef": cell.hnsw_ef, "exact": False}
     if cell.rescore is not None:
         params["quantization"] = {
@@ -203,7 +216,13 @@ async def query(
     ids = [data.corpus_ids[int(point["id"])] for point in points]
     if len(ids) != cell.k:
         raise ValueError(f"Expected {cell.k} results, received {len(ids)}")
-    return ids, elapsed_ms, float(response["time"]) * 1000
+    hardware = (response.get("usage") or {}).get("hardware")
+    usage = (
+        {field: int(hardware[field]) for field in HARDWARE_FIELDS if field in hardware}
+        if hardware
+        else None
+    )
+    return ids, elapsed_ms, float(response["time"]) * 1000, usage
 
 
 async def reset_cache(
@@ -270,11 +289,12 @@ async def measure_cell(
                     client, collection, len(data.corpus_ids), config
                 )
             pass_record["before"] = host_memory()
+            _, pass_record["server_before"] = await server_metrics(client, collection)
             order = indices.copy()
             random.Random(config.seed + repeat).shuffle(order)
             for position, row in enumerate(order):
                 query_id = data.query_ids[row]
-                ids, client_ms, server_ms = await query(
+                ids, client_ms, server_ms, usage = await query(
                     client,
                     collection,
                     data,
@@ -313,10 +333,18 @@ async def measure_cell(
                     "unix_seconds": time.time(),
                     "request_ms": client_ms,
                     "server_ms": server_ms,
+                    **{field: None for field in HARDWARE_FIELDS},
+                    **(usage or {}),
                 }
+                if usage is None and config.require_telemetry:
+                    raise RuntimeError(
+                        "Query responses carry no hardware usage; start Qdrant with "
+                        "QDRANT__SERVICE__HARDWARE_REPORTING=true"
+                    )
                 stream.write(json.dumps(record, allow_nan=False) + "\n")
             stream.flush()
             pass_record["after"] = host_memory()
+            _, pass_record["server_after"] = await server_metrics(client, collection)
             with (directory / "passes.jsonl").open("a") as passes:
                 passes.write(json.dumps(pass_record) + "\n")
 
@@ -341,6 +369,8 @@ async def measure_method(
     try:
         # A unique run ID makes cleanup independent of any pre-existing collection.
         write_json(directory / "memory-pre-index.json", host_memory())
+        _, before = await server_metrics(client)
+        write_json(directory / "server-memory-pre-index.json", before)
         await request(
             client,
             "PUT",
@@ -351,9 +381,9 @@ async def measure_method(
         await create_collection(client, collection, data, config, method, directory)
         write_json(directory / "storage.json", collection_storage(collection))
         write_json(directory / "memory-post-index.json", host_memory())
-        metrics = await client.get("/metrics")
-        metrics.raise_for_status()
-        (directory / "metrics-before.prom").write_text(metrics.text)
+        text, after_index = await server_metrics(client, collection)
+        (directory / "metrics-before.prom").write_text(text)
+        write_json(directory / "server-memory-post-index.json", after_index)
         grid = config.grid(method)
         random.Random(config.seed).shuffle(grid)
         for cell in grid:
@@ -375,10 +405,30 @@ async def measure_method(
                 output,
                 directory,
             )
-        metrics = await client.get("/metrics")
-        metrics.raise_for_status()
-        (directory / "metrics-after.prom").write_text(metrics.text)
+        text, after_search = await server_metrics(client, collection)
+        (directory / "metrics-after.prom").write_text(text)
+        write_json(directory / "server-memory-post-search.json", after_search)
         write_json(directory / "memory-post-search.json", host_memory())
+        write_json(
+            directory / "footprint.json",
+            {
+                "note": "Allocator heap deltas against the pre-index snapshot; "
+                "memory-mapped file pages are not included, see memory-*.json "
+                "and resources.jsonl for RSS and cgroup counters.",
+                "available": bool(before["memory"]),
+                **{
+                    f"{stage}_{gauge}_delta_bytes": snapshot["memory"][gauge]
+                    - before["memory"][gauge]
+                    for stage, snapshot in (
+                        ("post_index", after_index),
+                        ("post_search", after_search),
+                    )
+                    for gauge in before["memory"]
+                    if gauge in snapshot["memory"]
+                },
+                "collection_hardware_counters": after_search["hardware"],
+            },
+        )
     finally:
         stop.set()
         try:
@@ -448,6 +498,8 @@ async def run_benchmark(config: Benchmark, data_path: Path, output: Path) -> Non
     run_id = uuid4().hex[:12]
     async with connect() as client:
         root = await request(client, "GET", "/")
+        _, metrics = await server_metrics(client)
+        telemetry["allocator_metrics"] = bool(metrics["memory"])
         if root["version"] != config.expected_qdrant_version:
             raise ValueError(
                 f"Expected Qdrant {config.expected_qdrant_version}, received {root['version']}"

@@ -63,8 +63,10 @@ eligible point keeps its highest-recall point and is reported as a miss;
 nothing is retuned on test.
 
 **Ablations**: `configs/ablation.yaml` holds the fixed-effort
-rescoring/oversampling ablation together with the extended bit depths (bits2,
-bits1) and product16. `configs/datatype.yaml` compares float32 without
+rescoring/oversampling ablation together with the extended set from the
+modern-quantization-bench reference: binary 1.5-bit and 2-bit encodings, binary
+1-bit with an 8-bit scalar query, TurboQuant bits2, bits1_5, bits1, and
+product16. `configs/datatype.yaml` compares float32 without
 quantization, float32 plus TurboQuant bits4 with and without rescoring, the
 `turbo4` datatype without a search copy, and the bits1 pairing. Rescoring
 against `turbo4` storage cannot restore float32 precision, and changing the
@@ -84,15 +86,16 @@ configurations fail; they are never silently replaced.
 - **Latency**: server processing time and client wall-clock p50/p95, with
   concurrency one, embedding generation excluded, and no vectors or payloads
   returned.
-- **Memory**: process RSS, cgroup current/peak, anonymous/file-backed
-  breakdown, available heap metrics, sampled every 100 ms, with snapshots
+- **Memory**: allocator heap deltas (`heap_mb` in the reference bench), process
+  RSS, cgroup current/peak, anonymous/file-backed breakdown, sampled every 100 ms, with snapshots
   before indexing, after indexing, and after search. Indexing and query
   intervals are separate; overlapping counters are never summed.
 - **Storage**: allocated and logical collection bytes by file while the
   collection exists, classified into vectors, quantized data, HNSW, payload,
   and WAL during analysis.
-- **I/O**: process read/write bytes, minor/major page faults, and cgroup
-  `io.stat` before and after every pass.
+- **I/O**: per-query CPU and vector/payload I/O read counters from the server,
+  process read/write bytes, minor/major page faults, and cgroup `io.stat`
+  before and after every pass.
 
 Five measured warm passes and three independently built indexes for the
 primary comparison. Per-query records are retained; paired uncertainty across

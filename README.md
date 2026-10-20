@@ -85,7 +85,7 @@ and skips any stage that already completed:
 | `select` | `qbench select` | Per method and k, the fastest dev point with ANN Recall@k ≥ 0.95 and nDCG@10 within 0.01 of exact float32; frozen to `selected.yaml` before any test query is read |
 | `selected` | `selected.yaml` | Held-out evaluation of the frozen points; misses are reported, never retuned |
 | `datatype` | `configs/datatype.yaml` | `turbo4` stored datatype versus float32 plus TurboQuant search copies |
-| `ablation` | `configs/ablation.yaml` | Fixed-effort rescoring/oversampling ablation plus product16, turbo2, turbo1 |
+| `ablation` | `configs/ablation.yaml` | Fixed-effort rescoring/oversampling ablation plus the extended set: binary 1.5/2-bit, scalar-8 query encoding, TurboQuant 2/1.5/1-bit, product16 |
 
 Repeat for `scifact`, `nfcorpus`, `quora` and for `bge`. The two extra
 experiments are separate because they change the host condition:
@@ -106,10 +106,12 @@ telemetry. See [VM operation](docs/vm.md) and the [protocol](docs/protocol.md).
 
 Every run directory holds `manifest.json` (server version, configuration,
 artifact checksums, query IDs, telemetry targets, selection provenance),
-per-query `queries.jsonl`, `summary.json`, and per build/method directories
-with the collection configuration, storage breakdown, memory snapshots before
-and after indexing and search, Prometheus metrics, 100 ms resource samples,
-and per-pass I/O and page-fault counters. How to read them:
+per-query `queries.jsonl` with server and client latency plus per-query CPU and
+vector I/O usage, `summary.json`, and per build/method directories with the
+collection configuration, storage breakdown, allocator heap deltas
+(`footprint.json`), host memory snapshots before and after indexing and
+search, Prometheus metrics, 100 ms resource samples, and per-pass I/O and
+page-fault counters. How to read them:
 [results](docs/results.md).
 
 Turbo8 is excluded until a release with verified server and client support

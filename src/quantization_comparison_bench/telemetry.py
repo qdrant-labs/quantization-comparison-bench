@@ -176,3 +176,22 @@ async def sample_resources(output: Path, stop: asyncio.Event) -> None:
                 await asyncio.wait_for(stop.wait(), timeout=0.1)
             except TimeoutError:
                 pass
+
+
+def parse_metrics(text: str, collection: str | None = None) -> dict[str, Any]:
+    """Pick the allocator memory gauges and one collection's hardware counters."""
+    memory: dict[str, int] = {}
+    hardware: dict[str, int] = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        name, _, value = line.rpartition(" ")
+        if name.startswith("memory_") and value.lstrip("-").isdigit():
+            memory[name] = int(value)
+        elif collection and name.startswith("collection_hardware_metric_"):
+            metric, _, label = name.partition("{")
+            if label == f'id="{collection}"}}' and value.isdigit():
+                hardware[metric.removeprefix("collection_hardware_metric_")] = int(
+                    value
+                )
+    return {"unix_seconds": time.time(), "memory": memory, "hardware": hardware}

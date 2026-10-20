@@ -1,5 +1,6 @@
 # Fixed-effort ablation: what rescoring and oversampling each add, plus the
-# extended bit depths and product compression settings. Test split, hnsw_ef 256.
+# extended bit depths (binary 1.5/2-bit, scalar-8 query encoding, TurboQuant
+# 2/1.5/1-bit) and product16. Test split, hnsw_ef 256.
 expected_qdrant_version: "1.19.2"
 datasets: [fiqa, scifact, nfcorpus, quora]
 models: [cohere, bge]
@@ -21,8 +22,12 @@ methods:
   - {name: float32, quantizer: none}
   - {name: scalar8, quantizer: scalar, quantile: 0.99}
   - {name: binary1, quantizer: binary, query_encoding: binary}
+  - {name: binary1_scalar8, quantizer: binary, query_encoding: scalar8bits}
+  - {name: binary1_5, quantizer: binary, encoding: one_and_half_bits}
+  - {name: binary2, quantizer: binary, encoding: two_bits}
   - {name: product8, quantizer: product, compression: x8}
   - {name: product16, quantizer: product, compression: x16}
   - {name: turbo4, quantizer: turbo, bits: 4}
   - {name: turbo2, quantizer: turbo, bits: 2}
+  - {name: turbo1_5, quantizer: turbo, bits: 1.5}
   - {name: turbo1, quantizer: turbo, bits: 1}
