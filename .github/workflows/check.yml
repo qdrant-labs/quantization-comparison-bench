@@ -22,10 +22,17 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run ty check src/
+      - run: uv run pytest
+      - run: bash -n scripts/*.sh
       - run: uv run qbench fixture --output data/synthetic
       - run: uv run qbench verify --data data/synthetic
       - run: uv run qbench ground-truth --data data/synthetic
-      - run: uv run qbench plan --config configs/benchmark.yaml
+      - run: uv run qbench readiness --data-root data || true
+      - name: Plan every shipped configuration
+        run: |
+          for config in configs/*.yaml; do
+            uv run qbench plan --config "$config" > /dev/null
+          done
 
   live-smoke:
     runs-on: ubuntu-latest

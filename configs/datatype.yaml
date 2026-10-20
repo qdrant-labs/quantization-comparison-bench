@@ -1,5 +1,23 @@
+# Stored-datatype experiment: turbo4 stored vectors versus float32 originals
+# with a TurboQuant search copy. Rescoring against turbo4 storage cannot
+# restore float32 precision, so rescoring off/on is kept for every pair.
 expected_qdrant_version: "1.19.2"
+datasets: [fiqa, scifact, nfcorpus, quora]
+models: [cohere, bge]
 builds: 3
+seed: 42
+hnsw:
+  m: 16
+  ef_construct: 100
+search:
+  ks: [10, 100]
+  hnsw_ef: [256]
+  rescoring: [false, true]
+  oversampling: [2]
+  split: test
+  max_queries: 150
+  warmup_queries: 50
+  repeats: 5
 methods:
   - {name: float32, quantizer: none}
   - {name: float32_turbo4, quantizer: turbo, bits: 4}

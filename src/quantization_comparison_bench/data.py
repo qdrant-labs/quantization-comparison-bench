@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import random
 import re
 from collections.abc import Awaitable, Callable, Iterable
@@ -12,15 +11,17 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Literal, TypedDict, cast
 
-import httpx
 import numpy as np
 from numpy.typing import NDArray
 
 DATASET_SOURCE = "CohereLabs/beir-embed-english-v3"
 BGE_MODEL = "BAAI/bge-small-en-v1.5"
-COHERE_MODEL = "embed-multilingual-v3.0"
+# The source dataset ships vectors from this hosted model; no API calls are made.
+COHERE_MODEL = "embed-english-v3.0"
+COHERE_DIMENSIONS = 1024
 BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 SUPPORTED_DATASETS = {"fiqa", "scifact", "nfcorpus", "quora"}
+DATASETS_IN_ORDER = ("scifact", "nfcorpus", "fiqa", "quora")
 type FloatArray = NDArray[np.float32]
 type Split = Literal["dev", "test"]
 type Qrels = dict[str, dict[str, int]]
@@ -45,6 +46,7 @@ class QrelRow(TypedDict):
 class SourceQuery(TypedDict):
     _id: str
     text: str
+    emb: list[float]
 
 
 class SourceText(SourceQuery):
@@ -99,22 +101,70 @@ def _sample[T](rows: list[T], count: int | None, seed: int) -> list[T]:
     return [rows[index] for index in selected]
 
 
-def _source_rows(
+def _source_files(
     dataset: str, component: str, split: str, revision: str
-) -> Iterable[object]:
+) -> list[Path]:
+    """Download the pinned Parquet files for one component and split."""
     try:
-        from datasets import load_dataset  # ty: ignore[unresolved-import]
+        from huggingface_hub import HfApi, hf_hub_download
     except ImportError as error:
         raise RuntimeError(
             "Install dataset support with: uv sync --extra datasets"
         ) from error
-    return load_dataset(
-        DATASET_SOURCE,
-        f"{dataset}-{component}",
-        split=split,
-        revision=revision,
-        streaming=True,
+    prefix = f"{dataset}/{component}"
+    entries = HfApi().list_repo_tree(
+        DATASET_SOURCE, path_in_repo=prefix, repo_type="dataset", revision=revision
     )
+    names = sorted(
+        entry.path
+        for entry in entries
+        if entry.path.endswith(".parquet")
+        and (component == "corpus" or entry.path == f"{prefix}/{split}.parquet")
+    )
+    if not names:
+        raise ValueError(f"No {component}/{split} Parquet files for {dataset}")
+    return [
+        Path(
+            hf_hub_download(
+                DATASET_SOURCE, name, repo_type="dataset", revision=revision
+            )
+        )
+        for name in names
+    ]
+
+
+def _parquet_rows(paths: list[Path], columns: list[str]) -> Iterable[dict[str, object]]:
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as error:
+        raise RuntimeError(
+            "Install dataset support with: uv sync --extra datasets"
+        ) from error
+    for path in paths:
+        parquet = pq.ParquetFile(path)
+        for batch in parquet.iter_batches(batch_size=2048, columns=columns):
+            yield from batch.to_pylist()
+
+
+def _parquet_row_count(paths: list[Path]) -> int:
+    import pyarrow.parquet as pq
+
+    return sum(pq.ParquetFile(path).metadata.num_rows for path in paths)
+
+
+def _source_rows(
+    dataset: str, component: str, split: str, revision: str, columns: list[str]
+) -> tuple[Iterable[dict[str, object]], dict[str, str]]:
+    paths = _source_files(dataset, component, split, revision)
+    hashes = {f"{dataset}/{component}/{path.name}": _checksum(path) for path in paths}
+    return _parquet_rows(paths, columns), hashes
+
+
+def _as_vector(values: object, label: str) -> FloatArray:
+    vector = np.asarray(values, dtype=np.float32)
+    if vector.shape != (COHERE_DIMENSIONS,) or not np.isfinite(vector).all():
+        raise ValueError(f"{label}: expected a finite {COHERE_DIMENSIONS}-d vector")
+    return vector
 
 
 def _prepare_queries(
@@ -123,38 +173,44 @@ def _prepare_queries(
     dev_queries: int,
     max_test_queries: int | None,
     seed: int,
-) -> tuple[list[QueryRow], list[QrelRow]]:
+) -> tuple[list[QueryRow], list[QrelRow], dict[str, FloatArray], dict[str, str]]:
     queries: list[QueryRow] = []
     qrels: list[QrelRow] = []
-    for split, source_split, limit in [
+    vectors: dict[str, FloatArray] = {}
+    hashes: dict[str, str] = {}
+    plan: list[tuple[Split, str, int | None]] = [
         ("dev", "train" if dataset == "scifact" else "dev", dev_queries),
         ("test", "test", max_test_queries),
-    ]:
-        source = cast(
-            Iterable[SourceQuery],
-            _source_rows(dataset, "queries", source_split, revision),
+    ]
+    for split, source_split, limit in plan:
+        rows, found = _source_rows(
+            dataset, "queries", source_split, revision, ["_id", "text", "emb"]
         )
-        candidates = sorted(
-            [
-                {"id": str(row["_id"]), "text": row["text"], "split": split}
-                for row in source
-            ],
-            key=lambda row: row["id"],
-        )
-        selected = cast(list[QueryRow], _sample(candidates, limit, seed))
+        hashes.update(found)
+        source = cast(Iterable[SourceQuery], rows)
+        candidates: list[QueryRow] = []
+        embeddings: dict[str, FloatArray] = {}
+        for row in source:
+            query_id = str(row["_id"])
+            candidates.append({"id": query_id, "text": row["text"], "split": split})
+            embeddings[query_id] = _as_vector(row["emb"], f"query {query_id}")
+        candidates.sort(key=lambda row: row["id"])
+        selected = _sample(candidates, limit, seed)
         selected_ids = {row["id"] for row in selected}
         queries.extend(selected)
-        judgments = cast(
-            Iterable[SourceQrel], _source_rows(dataset, "qrels", source_split, revision)
+        vectors.update({qid: embeddings[qid] for qid in selected_ids})
+        judgments, found = _source_rows(
+            dataset, "qrels", source_split, revision, ["query_id", "corpus_id", "score"]
         )
+        hashes.update(found)
         qrels.extend(
             QrelRow(
                 query_id=str(row["query_id"]),
                 doc_id=str(row["corpus_id"]),
                 relevance=int(row["score"]),
-                split=cast(Split, split),
+                split=split,
             )
-            for row in judgments
+            for row in cast(Iterable[SourceQrel], judgments)
             if str(row["query_id"]) in selected_ids
         )
     ids = [row["id"] for row in queries]
@@ -162,7 +218,12 @@ def _prepare_queries(
         raise ValueError(
             "Duplicate query IDs or overlap between development and test splits."
         )
-    return queries, sorted(qrels, key=lambda row: (row["query_id"], row["doc_id"]))
+    return (
+        queries,
+        sorted(qrels, key=lambda row: (row["query_id"], row["doc_id"])),
+        vectors,
+        hashes,
+    )
 
 
 def _subset_corpus(
@@ -191,6 +252,19 @@ def _subset_corpus(
     return [row for row in corpus if row["id"] in selected_ids]
 
 
+def _import_versions() -> dict[str, str]:
+    try:
+        return {name: version(name) for name in ("numpy", "huggingface_hub", "pyarrow")}
+    except PackageNotFoundError as error:
+        raise RuntimeError(
+            "Install dataset support with: uv sync --extra datasets"
+        ) from error
+
+
+def cohere_artifact_dir(data_root: Path, dataset: str) -> Path:
+    return data_root / "embeddings" / dataset / "cohere"
+
+
 def prepare_dataset(
     dataset: str,
     output: Path,
@@ -199,8 +273,14 @@ def prepare_dataset(
     seed: int = 42,
     max_docs: int | None = None,
     max_test_queries: int | None = None,
+    embeddings_output: Path | None = None,
 ) -> None:
-    """Freeze raw BEIR text, query splits, and original relevance labels."""
+    """Freeze raw BEIR text, query splits, original labels, and Cohere arrays.
+
+    `output/<dataset>/` receives the text artifacts used for BGE embedding.
+    `embeddings_output` (default `output/../embeddings/<dataset>/cohere`) receives
+    the supplied Cohere embed-english-v3.0 vectors in the final artifact format.
+    """
     if dataset not in SUPPORTED_DATASETS:
         raise ValueError(f"Choose a dataset from {sorted(SUPPORTED_DATASETS)}.")
     revision = _require_commit(revision)
@@ -209,46 +289,68 @@ def prepare_dataset(
     if max_test_queries is not None and max_test_queries < 1:
         raise ValueError("max_test_queries must be positive.")
     destination = output / dataset
-    if destination.exists() and any(destination.iterdir()):
-        raise FileExistsError(f"Use an empty output directory: {destination}")
-    queries, qrels = _prepare_queries(
+    vectors_dir = embeddings_output or cohere_artifact_dir(output.parent, dataset)
+    for directory in (destination, vectors_dir):
+        if directory.exists() and any(directory.iterdir()):
+            raise FileExistsError(f"Use an empty output directory: {directory}")
+    library_versions = _import_versions()
+    queries, qrels, query_vectors, source_hashes = _prepare_queries(
         dataset, revision, dev_queries, max_test_queries, seed
     )
-    source = cast(
-        Iterable[SourceText], _source_rows(dataset, "corpus", "train", revision)
+    rows, found = _source_rows(
+        dataset, "corpus", "train", revision, ["_id", "title", "text", "emb"]
     )
-    corpus = sorted(
-        [
-            TextRow(
-                id=str(row["_id"]),
-                text="\n".join(
-                    part for part in [row["title"].strip(), row["text"].strip()] if part
-                ),
+    source_hashes.update(found)
+    corpus_count = _parquet_row_count(
+        _source_files(dataset, "corpus", "train", revision)
+    )
+    vectors_dir.mkdir(parents=True, exist_ok=True)
+    scratch = vectors_dir / "corpus-source-order.npy.tmp"
+    source_vectors = np.lib.format.open_memmap(
+        scratch, mode="w+", dtype=np.float32, shape=(corpus_count, COHERE_DIMENSIONS)
+    )
+    corpus: list[TextRow] = []
+    source_row: dict[str, int] = {}
+    try:
+        for position, row in enumerate(cast(Iterable[SourceText], rows)):
+            if position >= corpus_count:
+                raise ValueError("Corpus has more rows than its Parquet metadata.")
+            doc_id = str(row["_id"])
+            corpus.append(
+                TextRow(
+                    id=doc_id,
+                    text="\n".join(
+                        part
+                        for part in [row["title"].strip(), row["text"].strip()]
+                        if part
+                    ),
+                )
             )
-            for row in source
-        ],
-        key=lambda row: row["id"],
-    )
-    full_corpus_count = len(corpus)
-    corpus = _subset_corpus(corpus, queries, qrels, max_docs, seed)
-    if len({row["id"] for row in corpus}) != len(corpus):
-        raise ValueError("Duplicate document IDs in the source corpus.")
-    if not corpus or not queries or not qrels:
-        raise ValueError(
-            "Prepared dataset must have documents, queries, and judgments."
-        )
-    destination.mkdir(parents=True, exist_ok=True)
-    _write_jsonl(destination / "corpus.jsonl", corpus)
-    _write_jsonl(destination / "queries.jsonl", queries)
-    _write_jsonl(destination / "qrels.jsonl", qrels)
-    _write_json(
-        destination / "manifest.json",
-        {
-            "schema_version": 1,
+            source_vectors[position] = _as_vector(row["emb"], f"document {doc_id}")
+            source_row[doc_id] = position
+        if len(corpus) != corpus_count:
+            raise ValueError("Corpus has fewer rows than its Parquet metadata.")
+        if len(source_row) != len(corpus):
+            raise ValueError("Duplicate document IDs in the source corpus.")
+        source_vectors.flush()
+        corpus.sort(key=lambda row: row["id"])
+        full_corpus_count = len(corpus)
+        corpus = _subset_corpus(corpus, queries, qrels, max_docs, seed)
+        if not corpus or not queries or not qrels:
+            raise ValueError(
+                "Prepared dataset must have documents, queries, and judgments."
+            )
+        destination.mkdir(parents=True, exist_ok=True)
+        _write_jsonl(destination / "corpus.jsonl", corpus)
+        _write_jsonl(destination / "queries.jsonl", queries)
+        _write_jsonl(destination / "qrels.jsonl", qrels)
+        raw_manifest = {
+            "schema_version": 2,
             "dataset": dataset,
             "source": DATASET_SOURCE,
             "source_revision": revision,
-            "datasets_version": version("datasets"),
+            "source_files_sha256": dict(sorted(source_hashes.items())),
+            "library_versions": library_versions,
             "seed": seed,
             "development_source_split": "train" if dataset == "scifact" else "dev",
             "counts": {
@@ -256,18 +358,130 @@ def prepare_dataset(
                 "full_corpus_documents": full_corpus_count,
                 "dev_queries": sum(row["split"] == "dev" for row in queries),
                 "test_queries": sum(row["split"] == "test" for row in queries),
+                "full_test_queries": max_test_queries is None,
                 "qrels": len(qrels),
             },
             "smoke_subset": max_docs is not None or max_test_queries is not None,
             "serialization": "stripped title + newline + stripped body; omit empty parts",
-            "source_embeddings_used": False,
+            "source_embeddings_used": True,
             "label_policy": "original integer grades; retain all judgments for selected queries",
-            "checksums": {
-                name: _checksum(destination / name)
-                for name in ("corpus.jsonl", "queries.jsonl", "qrels.jsonl")
-            },
-        },
+        }
+        raw_manifest["checksums"] = {
+            name: _checksum(destination / name)
+            for name in ("corpus.jsonl", "queries.jsonl", "qrels.jsonl")
+        }
+        _write_json(destination / "manifest.json", raw_manifest)
+        # Final Cohere artifact: rows follow the sorted, possibly subset, corpus.
+        order = np.asarray([source_row[row["id"]] for row in corpus], dtype=np.int64)
+        temporary = vectors_dir / "corpus.npy.tmp"
+        combined = np.lib.format.open_memmap(
+            temporary,
+            mode="w+",
+            dtype=np.float32,
+            shape=(len(order), COHERE_DIMENSIONS),
+        )
+        norm_deviation = 0.0
+        for start in range(0, len(order), 8192):
+            block = np.asarray(source_vectors[order[start : start + 8192]])
+            norms = np.linalg.norm(block, axis=1)
+            norm_deviation = max(norm_deviation, float(np.abs(norms - 1).max()))
+            combined[start : start + len(block)] = _normalize(block)
+        combined.flush()
+        del combined
+        temporary.replace(vectors_dir / "corpus.npy")
+        query_matrix = np.stack([query_vectors[row["id"]] for row in queries])
+        norm_deviation = max(
+            norm_deviation,
+            float(np.abs(np.linalg.norm(query_matrix, axis=1) - 1).max()),
+        )
+        _save_array(vectors_dir / "queries.npy", _normalize(query_matrix))
+    finally:
+        del source_vectors
+        scratch.unlink(missing_ok=True)
+    qrels_map: Qrels = {row["id"]: {} for row in queries}
+    for row in qrels:
+        qrels_map[row["query_id"]][row["doc_id"]] = row["relevance"]
+    config: dict[str, object] = {
+        "dataset": dataset,
+        "model": COHERE_MODEL,
+        "model_revision": None,
+        "dimensions": COHERE_DIMENSIONS,
+        "corpus_input_type": "search_query"
+        if dataset == "quora"
+        else "search_document",
+        "query_input_type": "search_query",
+        "query_instruction": "",
+        "truncate": "as published by the source dataset",
+        "normalization": "L2 float32",
+        "source_manifest_sha256": _checksum(destination / "manifest.json"),
+        "library_versions": library_versions,
+        "device": "imported",
+        "source_revision": revision,
+        "source_files_sha256": dict(sorted(source_hashes.items())),
+        "source_norm_max_abs_deviation": norm_deviation,
+    }
+    _write_json(vectors_dir / "embedding-config.json", config)
+    _write_embedding_metadata(
+        vectors_dir,
+        [row["id"] for row in corpus],
+        [row["id"] for row in queries],
+        {row["id"]: row["split"] for row in queries},
+        qrels_map,
+        {**config, "source_manifest": raw_manifest, "synthetic": False},
     )
+
+
+def artifact_complete(path: Path) -> bool:
+    """True when a manifest exists and every checksum it lists still matches."""
+    manifest = path / "manifest.json"
+    if not manifest.is_file():
+        return False
+    completed = json.loads(manifest.read_text(encoding="utf-8"))
+    return all(
+        (path / name).is_file() and _checksum(path / name) == expected
+        for name, expected in completed.get("checksums", {}).items()
+    )
+
+
+async def prepare_all(
+    data_root: Path,
+    revision: str,
+    with_bge: bool,
+    bge_revision: str | None,
+    dev_queries: int = 50,
+    seed: int = 42,
+    batch_size: int = 64,
+    datasets: Iterable[str] = DATASETS_IN_ORDER,
+) -> list[dict[str, object]]:
+    """Stage every corpus, its judgments, and Cohere arrays; optionally BGE."""
+    report: list[dict[str, object]] = []
+    for dataset in datasets:
+        raw = data_root / "raw" / dataset
+        cohere = cohere_artifact_dir(data_root, dataset)
+        if artifact_complete(raw) and artifact_complete(cohere):
+            status = "present"
+        else:
+            prepare_dataset(
+                dataset,
+                data_root / "raw",
+                revision,
+                dev_queries,
+                seed,
+                None,
+                None,
+                cohere,
+            )
+            status = "prepared"
+        entry: dict[str, object] = {"dataset": dataset, "raw": status, "cohere": status}
+        if with_bge:
+            bge = data_root / "embeddings" / dataset / "bge"
+            if artifact_complete(bge):
+                entry["bge"] = "present"
+            else:
+                await embed_dataset(raw, bge, "bge", batch_size, bge_revision)
+                entry["bge"] = "embedded"
+        report.append(entry)
+    return report
 
 
 def _normalize(values: FloatArray) -> FloatArray:
@@ -281,11 +495,7 @@ def _normalize(values: FloatArray) -> FloatArray:
 
 
 def _embedding_versions(model: str) -> dict[str, str]:
-    packages = (
-        ("numpy", "httpx")
-        if model == "cohere"
-        else ("numpy", "sentence-transformers", "transformers", "torch")
-    )
+    packages = ("numpy", "sentence-transformers", "transformers", "torch")
     try:
         return {name: version(name) for name in packages}
     except PackageNotFoundError as error:
@@ -297,33 +507,6 @@ def _save_array(path: Path, values: FloatArray) -> None:
     with temporary.open("wb") as file:
         np.save(file, values, allow_pickle=False)
     temporary.replace(path)
-
-
-async def _cohere_batch(
-    client: httpx.AsyncClient, texts: list[str], input_type: str
-) -> FloatArray:
-    for attempt in range(5):
-        response = await client.post(
-            "https://api.cohere.com/v2/embed",
-            json={
-                "model": COHERE_MODEL,
-                "texts": texts,
-                "input_type": input_type,
-                "embedding_types": ["float"],
-                "truncate": "END",
-            },
-        )
-        if response.status_code in {429, 500, 502, 503, 504} and attempt < 4:
-            await asyncio.sleep(min(2 ** (attempt + 1), 30))
-            continue
-        response.raise_for_status()
-        values = _normalize(
-            np.asarray(response.json()["embeddings"]["float"], dtype=np.float32)
-        )
-        if values.shape != (len(texts), 1024):
-            raise ValueError(f"Unexpected Cohere embedding shape: {values.shape}")
-        return values
-    raise RuntimeError("Cohere retry budget exhausted.")
 
 
 async def _embed_batches(
@@ -410,21 +593,21 @@ async def embed_dataset(
     revision: str | None = None,
     max_documents: int | None = None,
 ) -> None:
-    """Embed frozen data, reusing completed batches with identical inputs and settings."""
-    if model not in {"cohere", "bge"}:
-        raise ValueError("model must be 'cohere' or 'bge'.")
-    if batch_size < 1 or (model == "cohere" and batch_size > 96):
-        raise ValueError("batch_size must be positive; Cohere allows at most 96 texts.")
+    """Embed frozen text with BGE, reusing completed batches with identical inputs."""
+    if model == "cohere":
+        raise ValueError(
+            "Cohere embed-english-v3.0 vectors are imported by `qbench prepare`; "
+            "no embedding API calls are made."
+        )
+    if model != "bge":
+        raise ValueError("model must be 'bge'.")
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive.")
     if max_documents is not None:
         raise ValueError(
             "Use prepare_dataset(max_docs=...) to preserve query judgments in subsets."
         )
-    if model == "bge":
-        revision = _require_commit(revision)
-    elif revision is not None:
-        raise ValueError(
-            "Cohere exposes a model ID, not a Hugging Face model revision."
-        )
+    revision = _require_commit(revision)
     source_manifest = json.loads(
         (dataset_dir / "manifest.json").read_text(encoding="utf-8")
     )
@@ -438,21 +621,19 @@ async def embed_dataset(
     library_versions = _embedding_versions(model)
     config: dict[str, object] = {
         "dataset": dataset,
-        "model": COHERE_MODEL if model == "cohere" else BGE_MODEL,
+        "model": BGE_MODEL,
         "model_revision": revision,
-        "dimensions": 1024 if model == "cohere" else 384,
+        "dimensions": 384,
         "corpus_input_type": "search_query"
         if dataset == "quora"
         else "search_document",
         "query_input_type": "search_query",
-        "query_instruction": BGE_QUERY_INSTRUCTION
-        if model == "bge" and dataset != "quora"
-        else "",
-        "truncate": "END" if model == "cohere" else "right, max_seq_length=512",
+        "query_instruction": BGE_QUERY_INSTRUCTION if dataset != "quora" else "",
+        "truncate": "right, max_seq_length=512",
         "normalization": "L2 float32",
         "source_manifest_sha256": _checksum(dataset_dir / "manifest.json"),
         "library_versions": library_versions,
-        "device": "hosted" if model == "cohere" else "cpu",
+        "device": "cpu",
     }
     output.mkdir(parents=True, exist_ok=True)
     config_path = output / "embedding-config.json"
@@ -468,85 +649,45 @@ async def embed_dataset(
                 "Embedding output must be empty or have a matching embedding-config.json."
             )
         _write_json(config_path, config)
-    completed_manifest = output / "manifest.json"
-    if completed_manifest.exists():
-        completed = json.loads(completed_manifest.read_text(encoding="utf-8"))
-        if all(
-            (output / name).is_file() and _checksum(output / name) == expected
-            for name, expected in completed["checksums"].items()
-        ):
-            return
-    if model == "cohere":
-        key = os.environ.get("COHERE_API_KEY")
-        if not key:
-            raise ValueError(
-                "Set COHERE_API_KEY before running paid Cohere embedding requests."
-            )
-        async with httpx.AsyncClient(
-            headers={"Authorization": f"Bearer {key}"}, timeout=120
-        ) as client:
+    if artifact_complete(output):
+        return
+    try:
+        from sentence_transformers import SentenceTransformer  # ty: ignore[unresolved-import]
+    except ImportError as error:
+        raise RuntimeError("Install BGE support with: uv sync --extra bge") from error
+    encoder = await asyncio.to_thread(
+        SentenceTransformer, BGE_MODEL, revision=revision, device="cpu"
+    )
+    encoder.float()
+    encoder.eval()
+    encoder.max_seq_length = 512
+    encoder.tokenizer.truncation_side = "right"
 
-            async def encode_corpus(texts: list[str]) -> FloatArray:
-                return await _cohere_batch(
-                    client, texts, str(config["corpus_input_type"])
-                )
-
-            async def encode_queries(texts: list[str]) -> FloatArray:
-                return await _cohere_batch(client, texts, "search_query")
-
-            await _embed_batches(
-                corpus, output, "corpus", config, batch_size, encode_corpus
-            )
-            await _embed_batches(
-                cast(list[TextRow], queries),
-                output,
-                "queries",
-                config,
-                batch_size,
-                encode_queries,
-            )
-    else:
-        try:
-            from sentence_transformers import SentenceTransformer  # ty: ignore[unresolved-import]
-        except ImportError as error:
-            raise RuntimeError(
-                "Install BGE support with: uv sync --extra bge"
-            ) from error
-        encoder = await asyncio.to_thread(
-            SentenceTransformer, BGE_MODEL, revision=revision, device="cpu"
+    async def encode_corpus(texts: list[str]) -> FloatArray:
+        values = await asyncio.to_thread(
+            encoder.encode,
+            texts,
+            batch_size=batch_size,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
         )
-        encoder.float()
-        encoder.eval()
-        encoder.max_seq_length = 512
-        encoder.tokenizer.truncation_side = "right"
+        return _normalize(np.asarray(values, dtype=np.float32))
 
-        async def encode_corpus(texts: list[str]) -> FloatArray:
-            values = await asyncio.to_thread(
-                encoder.encode,
-                texts,
-                batch_size=batch_size,
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            )
-            return _normalize(np.asarray(values, dtype=np.float32))
-
-        async def encode_queries(texts: list[str]) -> FloatArray:
-            return await encode_corpus(
-                [str(config["query_instruction"]) + text for text in texts]
-            )
-
-        await _embed_batches(
-            corpus, output, "corpus", config, batch_size, encode_corpus
+    async def encode_queries(texts: list[str]) -> FloatArray:
+        return await encode_corpus(
+            [str(config["query_instruction"]) + text for text in texts]
         )
-        await _embed_batches(
-            cast(list[TextRow], queries),
-            output,
-            "queries",
-            config,
-            batch_size,
-            encode_queries,
-        )
+
+    await _embed_batches(corpus, output, "corpus", config, batch_size, encode_corpus)
+    await _embed_batches(
+        cast(list[TextRow], queries),
+        output,
+        "queries",
+        config,
+        batch_size,
+        encode_queries,
+    )
     qrels: Qrels = {row["id"]: {} for row in queries}
     for row in qrel_rows:
         qrels[row["query_id"]][row["doc_id"]] = row["relevance"]

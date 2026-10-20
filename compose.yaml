@@ -8,6 +8,7 @@ services:
     volumes:
       - ./data/qdrant:/qdrant/storage
     mem_limit: ${QDRANT_MEMORY_LIMIT:-28g}
+    memswap_limit: ${QDRANT_MEMORY_LIMIT:-28g}
     environment:
       QDRANT__TELEMETRY_DISABLED: "true"
     stop_grace_period: 1m

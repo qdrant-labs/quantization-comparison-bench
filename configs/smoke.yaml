@@ -1,9 +1,12 @@
+# Synthetic smoke workflow: exercises every quantizer and the turbo4 datatype.
+# Its numbers verify execution only.
 expected_qdrant_version: "1.19.2"
 datasets: [synthetic]
 models: [synthetic]
 builds: 1
 search:
   ks: [10, 100]
+  hnsw_ef: [64, 256]
   rescoring: [false, true]
   oversampling: [1, 2]
   split: test
