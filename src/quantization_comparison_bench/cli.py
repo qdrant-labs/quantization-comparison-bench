@@ -15,6 +15,7 @@ from .data import (
     prepare_dataset,
 )
 from .evaluation import artifact_status, verify_fixture
+from .report import build_report
 from .runner import doctor as check_server
 from .runner import run_benchmark, save_ground_truth
 from .runner import summarize as summarize_run
@@ -217,6 +218,15 @@ def select(
             "choices": config.selection["choices"],
         }
     )
+
+
+@app.command()
+def report(
+    results: Annotated[Path, typer.Option(exists=True)] = Path("results"),
+    output: Annotated[Path, typer.Option()] = Path("results/report"),
+) -> None:
+    """Build article tables with bootstrap intervals from completed runs."""
+    display(build_report(results, output))
 
 
 def main() -> None:

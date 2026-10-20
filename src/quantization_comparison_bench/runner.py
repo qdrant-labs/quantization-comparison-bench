@@ -34,6 +34,7 @@ from .telemetry import (
     refresh_targets,
     sample_resources,
 )
+from .transport import QueryConnection, query_connection
 
 HARDWARE_FIELDS = ("cpu", "vector_io_read", "payload_io_read", "payload_index_io_read")
 
@@ -196,7 +197,7 @@ async def create_collection(
 
 
 async def query(
-    client: httpx.AsyncClient,
+    connection: QueryConnection,
     collection: str,
     data: EmbeddingData,
     row: int,
@@ -220,9 +221,7 @@ async def query(
     if self_match is not None:
         body["filter"] = {"must_not": [{"has_id": [self_match]}]}
     started = time.perf_counter()
-    response = await request(
-        client, "POST", f"/collections/{collection}/points/query", body
-    )
+    response = await connection.post(f"/collections/{collection}/points/query", body)
     elapsed_ms = (time.perf_counter() - started) * 1000
     points = response["result"]["points"]
     ids = [data.corpus_ids[int(point["id"])] for point in points]
@@ -264,6 +263,7 @@ async def reset_cache(
 
 async def measure_cell(
     client: httpx.AsyncClient,
+    connection: QueryConnection,
     collection: str,
     data: EmbeddingData,
     ground_truth: dict[str, list[str]],
@@ -280,7 +280,7 @@ async def measure_cell(
         for step in range(max(config.search.warmup_queries, len(indices))):
             row = indices[step % len(indices)]
             await query(
-                client,
+                connection,
                 collection,
                 data,
                 row,
@@ -297,6 +297,7 @@ async def measure_cell(
                 "cache_state": config.cache_state,
             }
             if config.cache_state == "cold_start":
+                await connection.close()
                 pass_record["reset"] = await reset_cache(
                     client, collection, len(data.corpus_ids), config
                 )
@@ -307,7 +308,7 @@ async def measure_cell(
             for position, row in enumerate(order):
                 query_id = data.query_ids[row]
                 ids, client_ms, server_ms, usage = await query(
-                    client,
+                    connection,
                     collection,
                     data,
                     row,
@@ -363,6 +364,7 @@ async def measure_cell(
 
 async def measure_method(
     client: httpx.AsyncClient,
+    connection: QueryConnection,
     data: EmbeddingData,
     ground_truth: dict[str, list[str]],
     indices: list[int],
@@ -406,6 +408,7 @@ async def measure_method(
             )
             await measure_cell(
                 client,
+                connection,
                 collection,
                 data,
                 ground_truth,
@@ -508,6 +511,7 @@ async def run_benchmark(config: Benchmark, data_path: Path, output: Path) -> Non
     ground_truth = cached_ground_truth(data_path, max(config.search.ks))
     output.mkdir(parents=True, exist_ok=True)
     run_id = uuid4().hex[:12]
+    connection = query_connection()
     async with connect() as client:
         root = await request(client, "GET", "/")
         _, metrics = await server_metrics(client)
@@ -538,6 +542,7 @@ async def run_benchmark(config: Benchmark, data_path: Path, output: Path) -> Non
             "cpu_count": os.cpu_count(),
             "cache_state": config.cache_state,
             "concurrency": 1,
+            "client_transport": "asyncio HTTP/1.1 keep-alive, TCP_NODELAY, orjson",
             "telemetry": telemetry,
             "selection": config.selection,
         }
@@ -549,6 +554,7 @@ async def run_benchmark(config: Benchmark, data_path: Path, output: Path) -> Non
                 for method in methods:
                     await measure_method(
                         client,
+                        connection,
                         data,
                         ground_truth,
                         indices,
@@ -565,5 +571,6 @@ async def run_benchmark(config: Benchmark, data_path: Path, output: Path) -> Non
             manifest["error_type"] = type(error).__name__
             raise
         finally:
+            await connection.close()
             manifest["finished_at"] = datetime.now(UTC).isoformat()
             write_json(output / "manifest.json", manifest)
