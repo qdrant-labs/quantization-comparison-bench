@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import defaultdict
 from dataclasses import dataclass
@@ -23,6 +24,30 @@ class EmbeddingData:
 
 def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+ARTIFACT_FILES = (
+    "corpus.npy",
+    "queries.npy",
+    "corpus_ids.json",
+    "query_ids.json",
+    "query_splits.json",
+    "qrels.json",
+)
+EXPECTED_DIMENSIONS = {"cohere": 1024, "bge": 384}
+MODEL_LABELS = {
+    "embed-english-v3.0": "cohere",
+    "BAAI/bge-small-en-v1.5": "bge",
+    "synthetic-normal": "synthetic",
+}
+
+
+def artifact_signature(path: Path) -> dict[str, str]:
+    hashes = {}
+    for name in ARTIFACT_FILES:
+        with (path / name).open("rb") as stream:
+            hashes[name] = hashlib.file_digest(stream, "sha256").hexdigest()
+    return hashes
 
 
 def load_embeddings(path: Path) -> EmbeddingData:
@@ -62,9 +87,9 @@ def exact_ground_truth(
         raise ValueError("Corpus and query dimensions differ")
     corpus_positions = {doc_id: row for row, doc_id in enumerate(data.corpus_ids)}
     rankings: dict[str, list[str]] = {}
-    for query_start in range(0, len(data.query_ids), 32):
-        query_ids = data.query_ids[query_start : query_start + 32]
-        queries = data.queries[query_start : query_start + 32]
+    for query_start in range(0, len(data.query_ids), 256):
+        query_ids = data.query_ids[query_start : query_start + 256]
+        queries = data.queries[query_start : query_start + 256]
         best_scores = [np.empty(0, dtype=np.float32) for _ in query_ids]
         best_indices = [np.empty(0, dtype=np.int64) for _ in query_ids]
         for start in range(0, len(data.corpus_ids), block_size):
@@ -118,6 +143,7 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         "split",
         "k",
         "cache_state",
+        "hnsw_ef",
         "rescore",
         "oversampling",
         "build",
@@ -215,3 +241,58 @@ def verify_fixture(data_dir: Path) -> dict[str, object]:
         "exact_self_recall": 1.0,
         "self_matches_excluded": True,
     }
+
+
+def artifact_status(path: Path, dataset: str, model: str) -> dict[str, Any]:
+    """Readiness of one dataset/model artifact: hashes, dimensions, IDs, labels."""
+    report: dict[str, Any] = {"dataset": dataset, "model": model, "path": str(path)}
+    if not (path / "manifest.json").is_file():
+        return {**report, "status": "missing", "problems": ["manifest.json absent"]}
+    problems: list[str] = []
+    try:
+        data = load_embeddings(path)
+        if artifact_signature(path) != data.manifest.get("checksums"):
+            problems.append("artifact checksums differ from manifest")
+        validate_embeddings(data)
+        if data.manifest.get("dataset") != dataset:
+            problems.append(f"manifest dataset is {data.manifest.get('dataset')!r}")
+        if MODEL_LABELS.get(str(data.manifest.get("model"))) != model:
+            problems.append(f"manifest model is {data.manifest.get('model')!r}")
+        expected = EXPECTED_DIMENSIONS.get(model)
+        if expected is not None and data.corpus.shape[1] != expected:
+            problems.append(f"dimensions {data.corpus.shape[1]} != {expected}")
+        if data.manifest.get("synthetic"):
+            problems.append("artifact is synthetic")
+        splits = {"dev": 0, "test": 0}
+        for query_id in data.query_ids:
+            splits[data.query_splits[query_id]] += 1
+        if not splits["dev"] or not splits["test"]:
+            problems.append("both dev and test queries are required")
+        report.update(
+            {
+                "documents": len(data.corpus_ids),
+                "dev_queries": splits["dev"],
+                "test_queries": splits["test"],
+                "dimensions": int(data.corpus.shape[1]),
+                "source_revision": data.manifest.get("source_manifest", {}).get(
+                    "source_revision"
+                )
+                or data.manifest.get("source_revision"),
+                "model_revision": data.manifest.get("model_revision"),
+            }
+        )
+        ground_truth = path / "ground_truth.json"
+        if not ground_truth.is_file():
+            report["ground_truth"] = "missing"
+        else:
+            cached = json.loads(ground_truth.read_text())
+            report["ground_truth"] = (
+                "ok" if cached.get("artifacts") == artifact_signature(path) else "stale"
+            )
+            if report["ground_truth"] == "stale":
+                problems.append("ground_truth.json does not match the artifacts")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        problems.append(f"{type(error).__name__}: {error}")
+    report["status"] = "failed" if problems else "ready"
+    report["problems"] = problems
+    return report

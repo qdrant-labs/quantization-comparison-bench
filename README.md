@@ -1,36 +1,40 @@
 # Qdrant quantization comparison
 
-Experiment scaffold for a dedicated Linux VM. Compare scalar, binary, product,
-and TurboQuant quantization on the same English retrieval datasets, with Cohere
-Multilingual v3 (1,024 dimensions) and BGE-small-en-v1.5 (384 dimensions).
+Reproducible VM benchmark comparing scalar, binary, product, and TurboQuant
+quantization in Qdrant v1.19.2 on four English BEIR datasets (FiQA, SciFact,
+NFCorpus, Quora) with two embedding models: the supplied Cohere
+embed-english-v3.0 vectors (1,024 dimensions) and locally generated
+BGE-small-en-v1.5 vectors (384 dimensions). A separate experiment compares
+`turbo4` stored vectors with float32 originals plus a TurboQuant search copy.
 
-This repository contains an executable synthetic smoke workflow and the starting
-pipeline for real-data experiments. It does not contain benchmark findings.
-Synthetic results verify the pipeline; they do not establish retrieval quality or
-production performance.
+The repository holds the protocol, the pinned data manifest and preparation
+commands, the runner, and the VM scripts. It does not contain benchmark
+findings. Large data files stay outside Git; `data/` and `results/` are
+ignored.
 
-## Start on the VM
+## 1. Set up the VM
 
-Requirements: Linux x86-64, Docker Engine with Compose, Git, and
-[uv](https://docs.astral.sh/uv/getting-started/installation/). The working machine
-assumption is 8 vCPUs, 32 GiB RAM, and 200 GiB SSD; record the actual machine.
+Dedicated Linux x86-64 VM, 8 vCPUs, 32 GiB RAM, 200 GiB SSD, no GPU. Install
+Docker Engine with the Compose plugin, Git, and
+[uv](https://docs.astral.sh/uv/getting-started/installation/). Then:
 
 ```bash
 git clone https://github.com/qdrant-labs/quantization-comparison-bench.git
 cd quantization-comparison-bench
-uv sync --locked
+uv sync --locked --extra bge
 cp .env.example .env
 docker compose up -d
 curl --fail http://127.0.0.1:6333/readyz
 uv run qbench doctor
 ```
 
-If readiness is not yet available, wait for startup and repeat the readiness
-check. The Compose service binds to VM loopback and stores its data under
-`data/qdrant/`. See [VM operation](docs/vm.md) for SSH forwarding, memory limits,
-version recording, and run isolation.
+Compose binds Qdrant to the VM loopback, caps the container at 28 GiB with
+swap disabled, and stores data under `data/qdrant/`. Before measured runs,
+resolve the image digest and pin it in `.env` as described in
+[VM operation](docs/vm.md).
 
-## Execute the smoke experiment
+Verify the pipeline once with the synthetic smoke workflow. It needs no
+download or API key and its numbers are not results:
 
 ```bash
 uv run qbench fixture --output data/synthetic
@@ -40,90 +44,76 @@ uv run qbench run --config configs/smoke.yaml --data data/synthetic --output res
 uv run qbench summarize --input results/smoke
 ```
 
-The fixture uses deterministic synthetic vectors and relevance labels, with 256
-documents, 32 queries, and 384 dimensions. It needs no model download or paid API.
-Use a dedicated Qdrant instance for experiments; the runner creates and removes
-its experiment collections. Read `qbench run --help` before using an existing
-server.
+## 2. Stage the datasets
 
-The [Colab smoke notebook](notebooks/smoke.ipynb) runs the same workflow against
-a user-supplied HTTPS Qdrant endpoint. Download a source ZIP from the private
-repository while signed into GitHub, then upload it in the notebook; no GitHub
-token is stored in Colab. It requires an accessible experimental server; Colab
-does not run this Docker Compose service. Colab timings include its network path
-and are not the VM benchmark results.
-
-## Prepare the real experiment
-
-First inspect the planned matrix:
+One command stages all four corpora, their query splits and relevance
+judgments, and the Cohere arrays from the pinned Hugging Face revision. Add
+`--with-bge` to generate the BGE vectors on the VM CPU afterwards (Quora takes
+the longest; run it before any timing).
 
 ```bash
-uv run qbench plan --config configs/benchmark.yaml
+uv run qbench prepare-all --with-bge
+uv run qbench readiness --require-all
 ```
 
-The four corpora are **FiQA, SciFact, NFCorpus, and Quora**, evaluated separately.
-Both models embed the same document/query IDs. The linked
-[CohereLabs BEIR dataset](https://huggingface.co/datasets/CohereLabs/beir-embed-english-v3)
-contains English-v3 vectors; those precomputed vectors are not the selected
-Multilingual-v3 embeddings.
+`prepare-all` is idempotent: artifacts whose checksums verify are skipped.
+`readiness` checks hashes, dimensions, IDs, splits, labels, and ground-truth
+freshness for every dataset/model artifact and exits non-zero if anything is
+missing or inconsistent. No Cohere API calls are made at any point; the
+dataset revision and BGE revision are pinned in the CLI defaults and recorded
+in every manifest. Details: [data](docs/data.md).
 
-Dataset and BGE model revisions must be immutable Hugging Face commit IDs. The
-following examples use verified repository revisions; record these alongside the
-resulting embedding hashes. Set `COHERE_API_KEY` securely in the process
-environment before the Cohere command.
+## 3. Run a workload
+
+Source the VM environment script once per shell. It records the machine,
+kernel, swap, container image digest, repository commit, and lockfile hash
+under `results/environment/`, and exports the telemetry targets (process ID,
+cgroup path, storage path) the runner samples every 100 ms.
 
 ```bash
-uv run --extra datasets qbench prepare --dataset fiqa --revision f018922a46a51388348a307ec2fef28019a33026
-uv run qbench embed --dataset fiqa --model cohere
-uv run --extra bge qbench embed --dataset fiqa --model bge --revision 5c38ec7c405ec4b44b94cc5a9bb96e735b38267a
+source scripts/vm-env.sh
+scripts/run-workload.sh fiqa cohere
 ```
 
-Do not commit credentials. Cohere embedding makes paid API calls. Review the
-corpus, truncation policy, and expected cost before running it. BGE downloads the
-model and optional local-model dependencies.
-Repeat for `scifact`, `nfcorpus`, and `quora`, then build float32 ground truth and
-run each dataset/model artifact independently. Use `qbench --help` and the
-subcommand help for paths and available options.
+`run-workload.sh` takes one dataset/model artifact through the whole protocol
+and skips any stage that already completed:
 
-For the FiQA/Cohere artifact, after embedding:
+| Stage | Config | What it does |
+| --- | --- | --- |
+| `primary` | `configs/benchmark.yaml` | Controlled comparison at fixed settings: scalar8, binary1, product8, turbo4 against float32 HNSW, rescoring on, oversampling 2, `hnsw_ef` 256, top-10 and top-100, 150 seeded test queries, 5 warm passes, 3 index builds |
+| `tuning` | `configs/tuning.yaml` | Development sweep over `hnsw_ef` 64/128/256/512, oversampling 1/2/4/8, rescoring off/on |
+| `select` | `qbench select` | Per method and k, the fastest dev point with ANN Recall@k ≥ 0.95 and nDCG@10 within 0.01 of exact float32; frozen to `selected.yaml` before any test query is read |
+| `selected` | `selected.yaml` | Held-out evaluation of the frozen points; misses are reported, never retuned |
+| `datatype` | `configs/datatype.yaml` | `turbo4` stored datatype versus float32 plus TurboQuant search copies |
+| `ablation` | `configs/ablation.yaml` | Fixed-effort rescoring/oversampling ablation plus product16, turbo2, turbo1 |
+
+Repeat for `scifact`, `nfcorpus`, `quora` and for `bge`. The two extra
+experiments are separate because they change the host condition:
 
 ```bash
-uv run qbench verify --data data/embeddings/fiqa/cohere
-uv run qbench ground-truth --data data/embeddings/fiqa/cohere
-uv run qbench run --config configs/benchmark.yaml --data data/embeddings/fiqa/cohere --output results/fiqa-cohere-primary
-uv run qbench summarize --input results/fiqa-cohere-primary
-uv run qbench run --config configs/datatype.yaml --data data/embeddings/fiqa/cohere --output results/fiqa-cohere-datatype
+scripts/memory-pressure.sh                 # Quora/Cohere under a fixed 1 GiB container cap
+QBENCH_ALLOW_CACHE_RESET=1 uv run qbench run --config configs/cold-start.yaml \
+  --data data/embeddings/fiqa/cohere --output results/fiqa-cohere/cold-start
 ```
 
-Use `data/embeddings/fiqa/bge` and different output directories for BGE. Each run
-handles one artifact; the dataset/model lists in the plan do not automatically
-dispatch all eight workloads. The default configurations report test queries.
-Copy the configuration and set `search.split: dev` when selecting settings, then
-freeze the choices before the test runs.
+The memory-pressure runner refuses to start unless the effective cgroup limit
+equals the configured cap. The cold-start config runs `scripts/cache-reset.sh`
+before every pass: it stops the container, drops the host page cache, starts
+the container, and the pass warms as queries proceed. Both require readable VM
+telemetry. See [VM operation](docs/vm.md) and the [protocol](docs/protocol.md).
 
-The [protocol](docs/protocol.md) defines the full research comparison. The core
-matrix tests rescoring off/on, oversampling 1/2/4/8, and limits 10/100. The
-`turbo4` datatype experiment is separate. Turbo8 is conditional on a verified
-release and client API, not a default experiment.
+## Outputs
 
-Use `configs/tuning.yaml` for the development split before freezing choices for
-`configs/benchmark.yaml`. The runner executes one dataset/model at a time;
-repeat the commands for both models and all four datasets. The synthetic smoke
-configuration exercises all implemented quantizers and the `turbo4` datatype.
+Every run directory holds `manifest.json` (server version, configuration,
+artifact checksums, query IDs, telemetry targets, selection provenance),
+per-query `queries.jsonl`, `summary.json`, and per build/method directories
+with the collection configuration, storage breakdown, memory snapshots before
+and after indexing and search, Prometheus metrics, 100 ms resource samples,
+and per-pass I/O and page-fault counters. How to read them:
+[results](docs/results.md).
 
-## What still needs a measured run
-
-- Freeze dataset/model revisions, machine details, image digest, and all settings.
-- Generate real embeddings and exact rankings; select settings only on development
-  queries, then report untouched test queries.
-- Repeat index builds and report per-dataset quality with uncertainty.
-- Collect VM memory, storage, and I/O alongside search results. Heap alone is not
-  the resident working set.
-- Run controlled cold-cache and constrained-memory experiments explicitly. The
-  default warm workflow does not create either condition.
-
-The full design intentionally exceeds the small smoke workflow. No claim that the
-full benchmark is complete should be based on a successful smoke run.
+Turbo8 is excluded until a release with verified server and client support
+exists; the merged pull requests are not in v1.19.2.
 
 ## Development
 
@@ -132,10 +122,11 @@ uv sync --locked
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check src/
+uv run pytest
 ```
 
-CI checks the code and offline fixture without downloading datasets or calling
-embedding APIs. A separate `live-smoke` job runs the synthetic workflow against
-the pinned Qdrant release. Keep raw data, vectors, secrets, and
-generated results out of Git; publish reviewed result artifacts with the exact
-run manifest when the experiments are complete.
+CI runs those checks, the offline fixture, every shipped configuration through
+`qbench plan`, and a live synthetic smoke job against the pinned Qdrant
+release. The [Colab smoke notebook](notebooks/smoke.ipynb) runs the synthetic
+workflow against a user-supplied HTTPS endpoint; its timings are not VM
+results. Keep raw data, vectors, secrets, and generated results out of Git.

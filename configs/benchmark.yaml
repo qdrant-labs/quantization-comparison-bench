@@ -1,3 +1,6 @@
+# Primary controlled comparison at fixed settings (held-out test queries).
+# Rescoring on, oversampling 2, hnsw_ef 256; 150 seeded test queries per
+# dataset; five warm passes; three independently built indexes.
 expected_qdrant_version: "1.19.2"
 datasets: [fiqa, scifact, nfcorpus, quora]
 models: [cohere, bge]
@@ -6,12 +9,13 @@ seed: 42
 hnsw:
   m: 16
   ef_construct: 100
-  hnsw_ef: 256
 search:
   ks: [10, 100]
-  rescoring: [false, true]
-  oversampling: [1, 2, 4, 8]
+  hnsw_ef: [256]
+  rescoring: [true]
+  oversampling: [2]
   split: test
+  max_queries: 150
   warmup_queries: 50
   repeats: 5
 methods:
@@ -19,7 +23,4 @@ methods:
   - {name: scalar8, quantizer: scalar, quantile: 0.99}
   - {name: binary1, quantizer: binary, query_encoding: binary}
   - {name: product8, quantizer: product, compression: x8}
-  - {name: product16, quantizer: product, compression: x16}
   - {name: turbo4, quantizer: turbo, bits: 4}
-  - {name: turbo2, quantizer: turbo, bits: 2}
-  - {name: turbo1, quantizer: turbo, bits: 1}

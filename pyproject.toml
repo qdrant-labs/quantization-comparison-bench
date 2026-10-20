@@ -17,9 +17,12 @@ qbench = "quantization_comparison_bench.cli:main"
 
 [project.optional-dependencies]
 datasets = [
-    "datasets>=5.1.0",
+    "huggingface-hub>=0.36.0",
+    "pyarrow>=21.0.0",
 ]
 bge = [
+    "huggingface-hub>=0.36.0",
+    "pyarrow>=21.0.0",
     "sentence-transformers>=6.1.0",
 ]
 
@@ -29,9 +32,16 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "huggingface-hub>=0.36.0",
+    "pyarrow>=21.0.0",
+    "pytest>=8.4.0",
     "ruff>=0.17.1",
     "ty>=0.0.89",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
 
 [tool.ruff]
 target-version = "py312"

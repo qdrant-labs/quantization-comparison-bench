@@ -1,9 +1,9 @@
 import asyncio
-import hashlib
 import json
 import os
 import platform
 import random
+import shlex
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -13,35 +13,28 @@ from uuid import uuid4
 
 import httpx
 
-from .config import Benchmark, Method, collection_config
+from .config import Benchmark, Cell, Method, collection_config
 from .evaluation import (
+    MODEL_LABELS,
     EmbeddingData,
+    artifact_signature,
     exact_ground_truth,
     load_embeddings,
     quality_metric,
     summarize_records,
     validate_embeddings,
 )
-from .telemetry import collection_storage, host_memory, sample_resources
+from .telemetry import (
+    check_telemetry,
+    collection_storage,
+    host_memory,
+    refresh_targets,
+    sample_resources,
+)
 
 
 def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
-
-
-def artifact_signature(path: Path) -> dict[str, str]:
-    hashes = {}
-    for name in (
-        "corpus.npy",
-        "queries.npy",
-        "corpus_ids.json",
-        "query_ids.json",
-        "query_splits.json",
-        "qrels.json",
-    ):
-        with (path / name).open("rb") as stream:
-            hashes[name] = hashlib.file_digest(stream, "sha256").hexdigest()
-    return hashes
 
 
 def save_ground_truth(data_path: Path, k: int = 100) -> dict[str, list[str]]:
@@ -112,7 +105,37 @@ async def doctor() -> dict[str, Any]:
             "server": root,
             "host_platform": platform.platform(),
             "cpu_count": os.cpu_count(),
+            "telemetry": {
+                name: bool(os.environ.get(name))
+                for name in (
+                    "QDRANT_CONTAINER_ID",
+                    "QDRANT_PID",
+                    "QDRANT_CGROUP_PATH",
+                    "QDRANT_STORAGE_PATH",
+                )
+            },
         }
+
+
+async def wait_for_collection(
+    client: httpx.AsyncClient, name: str, points: int, deadline: float
+) -> dict[str, Any]:
+    while time.monotonic() < deadline:
+        try:
+            state = (await request(client, "GET", f"/collections/{name}"))["result"]
+        except (httpx.HTTPError, RuntimeError):
+            await asyncio.sleep(1)
+            continue
+        if state["optimizer_status"] != "ok":
+            raise RuntimeError(f"Qdrant optimizer failed: {state['optimizer_status']}")
+        if (
+            state["status"] == "green"
+            and state["points_count"] == points
+            and state["indexed_vectors_count"] >= points
+        ):
+            return state
+        await asyncio.sleep(1)
+    raise TimeoutError(f"Collection {name} did not become ready")
 
 
 async def create_collection(
@@ -138,20 +161,13 @@ async def create_collection(
                 },
             },
         )
-    deadline = time.monotonic() + config.indexing_timeout_seconds
-    while time.monotonic() < deadline:
-        state = (await request(client, "GET", f"/collections/{name}"))["result"]
-        if state["optimizer_status"] != "ok":
-            raise RuntimeError(f"Qdrant optimizer failed: {state['optimizer_status']}")
-        if (
-            state["status"] == "green"
-            and state["points_count"] == len(data.corpus_ids)
-            and state["indexed_vectors_count"] >= len(data.corpus_ids)
-        ):
-            write_json(output / "collection.json", state)
-            return
-        await asyncio.sleep(1)
-    raise TimeoutError(f"Collection {name} did not finish HNSW indexing")
+    state = await wait_for_collection(
+        client,
+        name,
+        len(data.corpus_ids),
+        time.monotonic() + config.indexing_timeout_seconds,
+    )
+    write_json(output / "collection.json", state)
 
 
 async def query(
@@ -159,22 +175,19 @@ async def query(
     collection: str,
     data: EmbeddingData,
     row: int,
-    k: int,
-    hnsw_ef: int,
-    rescore: bool | None,
-    oversampling: float | None,
+    cell: Cell,
     self_match: int | None,
 ) -> tuple[list[str], float, float]:
-    params: dict[str, Any] = {"hnsw_ef": hnsw_ef, "exact": False}
-    if rescore is not None:
+    params: dict[str, Any] = {"hnsw_ef": cell.hnsw_ef, "exact": False}
+    if cell.rescore is not None:
         params["quantization"] = {
             "ignore": False,
-            "rescore": rescore,
-            "oversampling": oversampling,
+            "rescore": cell.rescore,
+            "oversampling": cell.oversampling,
         }
     body: dict[str, Any] = {
         "query": data.queries[row].tolist(),
-        "limit": k,
+        "limit": cell.k,
         "with_payload": False,
         "with_vector": False,
         "params": params,
@@ -188,9 +201,34 @@ async def query(
     elapsed_ms = (time.perf_counter() - started) * 1000
     points = response["result"]["points"]
     ids = [data.corpus_ids[int(point["id"])] for point in points]
-    if len(ids) != k:
-        raise ValueError(f"Expected {k} results, received {len(ids)}")
+    if len(ids) != cell.k:
+        raise ValueError(f"Expected {cell.k} results, received {len(ids)}")
     return ids, elapsed_ms, float(response["time"]) * 1000
+
+
+async def reset_cache(
+    client: httpx.AsyncClient, collection: str, points: int, config: Benchmark
+) -> dict[str, Any]:
+    """Run the dedicated-VM cache-reset hook, then wait for the server."""
+    command = shlex.split(config.cache_reset_command or "")
+    started = time.monotonic()
+    completed = await asyncio.to_thread(
+        subprocess.run, command, capture_output=True, text=True, check=False
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"cache reset failed ({completed.returncode}): {completed.stderr[-2000:]}"
+        )
+    targets = await asyncio.to_thread(refresh_targets)
+    await wait_for_collection(
+        client, collection, points, time.monotonic() + config.indexing_timeout_seconds
+    )
+    return {
+        "command": command,
+        "seconds": time.monotonic() - started,
+        "stdout": completed.stdout[-2000:],
+        "targets": targets,
+    }
 
 
 async def measure_cell(
@@ -202,50 +240,56 @@ async def measure_cell(
     config: Benchmark,
     method: Method,
     build: int,
-    k: int,
-    rescore: bool | None,
-    oversampling: float | None,
+    cell: Cell,
     output: Path,
+    directory: Path,
 ) -> None:
     corpus_positions = {doc_id: index for index, doc_id in enumerate(data.corpus_ids)}
-    for step in range(max(config.search.warmup_queries, len(indices))):
-        row = indices[step % len(indices)]
-        await query(
-            client,
-            collection,
-            data,
-            row,
-            k,
-            config.hnsw.hnsw_ef,
-            rescore,
-            oversampling,
-            corpus_positions.get(data.query_ids[row]),
-        )
+    if config.cache_state == "warm":
+        for step in range(max(config.search.warmup_queries, len(indices))):
+            row = indices[step % len(indices)]
+            await query(
+                client,
+                collection,
+                data,
+                row,
+                cell,
+                corpus_positions.get(data.query_ids[row]),
+            )
     with (output / "queries.jsonl").open("a") as stream:
         for repeat in range(config.search.repeats):
+            pass_record: dict[str, Any] = {
+                "build": build,
+                "config": method.name,
+                "cell": cell.model_dump(),
+                "pass": repeat,
+                "cache_state": config.cache_state,
+            }
+            if config.cache_state == "cold_start":
+                pass_record["reset"] = await reset_cache(
+                    client, collection, len(data.corpus_ids), config
+                )
+            pass_record["before"] = host_memory()
             order = indices.copy()
             random.Random(config.seed + repeat).shuffle(order)
-            for row in order:
+            for position, row in enumerate(order):
                 query_id = data.query_ids[row]
                 ids, client_ms, server_ms = await query(
                     client,
                     collection,
                     data,
                     row,
-                    k,
-                    config.hnsw.hnsw_ef,
-                    rescore,
-                    oversampling,
+                    cell,
                     corpus_positions.get(query_id),
                 )
                 recall, ndcg = quality_metric(
-                    ids, ground_truth[query_id], data.qrels[query_id], k
+                    ids, ground_truth[query_id], data.qrels[query_id], cell.k
                 )
                 _, exact_ndcg = quality_metric(
                     ground_truth[query_id],
                     ground_truth[query_id],
                     data.qrels[query_id],
-                    k,
+                    cell.k,
                 )
                 record = {
                     "dataset": data.manifest.get("dataset", "unknown"),
@@ -253,12 +297,13 @@ async def measure_cell(
                     "config": method.name,
                     "build": build,
                     "repeat": repeat,
+                    "position": position,
                     "split": config.search.split,
-                    "k": k,
-                    "rescore": rescore,
-                    "oversampling": oversampling,
-                    "cache_state": "warm",
-                    "hnsw_ef": config.hnsw.hnsw_ef,
+                    "k": cell.k,
+                    "rescore": cell.rescore,
+                    "oversampling": cell.oversampling,
+                    "cache_state": config.cache_state,
+                    "hnsw_ef": cell.hnsw_ef,
                     "query_id": query_id,
                     "result_ids": ids,
                     "ann_recall": recall,
@@ -271,6 +316,9 @@ async def measure_cell(
                 }
                 stream.write(json.dumps(record, allow_nan=False) + "\n")
             stream.flush()
+            pass_record["after"] = host_memory()
+            with (directory / "passes.jsonl").open("a") as passes:
+                passes.write(json.dumps(pass_record) + "\n")
 
 
 async def measure_method(
@@ -292,6 +340,7 @@ async def measure_method(
     created = False
     try:
         # A unique run ID makes cleanup independent of any pre-existing collection.
+        write_json(directory / "memory-pre-index.json", host_memory())
         await request(
             client,
             "PUT",
@@ -307,9 +356,10 @@ async def measure_method(
         (directory / "metrics-before.prom").write_text(metrics.text)
         grid = config.grid(method)
         random.Random(config.seed).shuffle(grid)
-        for k, rescore, oversampling in grid:
+        for cell in grid:
             print(
-                f"build={build} method={method.name} k={k} rescore={rescore} oversampling={oversampling}",
+                f"build={build} method={method.name} k={cell.k} hnsw_ef={cell.hnsw_ef} "
+                f"rescore={cell.rescore} oversampling={cell.oversampling}",
                 flush=True,
             )
             await measure_cell(
@@ -321,14 +371,14 @@ async def measure_method(
                 config,
                 method,
                 build,
-                k,
-                rescore,
-                oversampling,
+                cell,
                 output,
+                directory,
             )
         metrics = await client.get("/metrics")
         metrics.raise_for_status()
         (directory / "metrics-after.prom").write_text(metrics.text)
+        write_json(directory / "memory-post-search.json", host_memory())
     finally:
         stop.set()
         try:
@@ -349,6 +399,21 @@ def summarize(output: Path) -> dict[str, Any]:
     return result
 
 
+def select_queries(data: EmbeddingData, config: Benchmark) -> list[int]:
+    """Seeded query subset from the configured split; stable for one artifact."""
+    indices = [
+        index
+        for index, query_id in enumerate(data.query_ids)
+        if data.query_splits[query_id] == config.search.split
+    ]
+    random.Random(config.seed).shuffle(indices)
+    if config.search.max_queries:
+        indices = indices[: config.search.max_queries]
+    if not indices:
+        raise ValueError(f"No queries for split {config.search.split}")
+    return indices
+
+
 async def run_benchmark(config: Benchmark, data_path: Path, output: Path) -> None:
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(
@@ -360,11 +425,7 @@ async def run_benchmark(config: Benchmark, data_path: Path, output: Path) -> Non
         raise ValueError(
             "Embedding artifacts do not match their saved manifest checksums"
         )
-    model_label = {
-        "embed-multilingual-v3.0": "cohere",
-        "BAAI/bge-small-en-v1.5": "bge",
-        "synthetic-normal": "synthetic",
-    }.get(data.manifest["model"])
+    model_label = MODEL_LABELS.get(data.manifest["model"])
     if (
         data.manifest["dataset"] not in config.datasets
         or model_label not in config.models
@@ -372,19 +433,16 @@ async def run_benchmark(config: Benchmark, data_path: Path, output: Path) -> Non
         raise ValueError(
             "Data artifact is not one of the datasets/models declared in the config"
         )
+    telemetry: dict[str, Any] = {
+        name: bool(os.environ.get(name))
+        for name in ("QDRANT_PID", "QDRANT_CGROUP_PATH", "QDRANT_STORAGE_PATH")
+    }
+    if config.require_telemetry:
+        telemetry["checked"] = check_telemetry(config.memory_limit_bytes)
     host_memory()
     if max(config.search.ks) >= len(data.corpus_ids):
         raise ValueError("Corpus must have more points than the largest k")
-    indices = [
-        index
-        for index, query_id in enumerate(data.query_ids)
-        if data.query_splits[query_id] == config.search.split
-    ]
-    random.Random(config.seed).shuffle(indices)
-    if config.search.max_queries:
-        indices = indices[: config.search.max_queries]
-    if not indices:
-        raise ValueError(f"No queries for split {config.search.split}")
+    indices = select_queries(data, config)
     ground_truth = cached_ground_truth(data_path, max(config.search.ks))
     output.mkdir(parents=True, exist_ok=True)
     run_id = uuid4().hex[:12]
@@ -408,17 +466,16 @@ async def run_benchmark(config: Benchmark, data_path: Path, output: Path) -> Non
             "git_revision": revision.stdout.strip() or None,
             "server": root,
             "configuration": config.model_dump(),
+            "model_label": model_label,
             "data_manifest": data.manifest,
             "artifact_checksums": artifact_signature(data_path),
             "query_ids": [data.query_ids[index] for index in indices],
             "platform": platform.platform(),
             "cpu_count": os.cpu_count(),
-            "cache_state": "warm",
+            "cache_state": config.cache_state,
             "concurrency": 1,
-            "telemetry": {
-                name: bool(os.environ.get(name))
-                for name in ("QDRANT_PID", "QDRANT_CGROUP_PATH", "QDRANT_STORAGE_PATH")
-            },
+            "telemetry": telemetry,
+            "selection": config.selection,
         }
         write_json(output / "manifest.json", manifest)
         try:

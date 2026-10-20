@@ -6,12 +6,19 @@ from typing import Annotated
 import httpx
 import typer
 
-from .config import load_config
-from .data import create_fixture, embed_dataset, prepare_dataset
-from .evaluation import verify_fixture
+from .config import load_config, save_config
+from .data import (
+    DATASETS_IN_ORDER,
+    create_fixture,
+    embed_dataset,
+    prepare_all,
+    prepare_dataset,
+)
+from .evaluation import artifact_status, verify_fixture
 from .runner import doctor as check_server
 from .runner import run_benchmark, save_ground_truth
 from .runner import summarize as summarize_run
+from .selection import select_from_run
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
 DATA_REVISION = "f018922a46a51388348a307ec2fef28019a33026"
@@ -29,27 +36,27 @@ def plan(
     """Show the declared experiment matrix without contacting external services."""
     settings = load_config(config)
     cells = [
-        {
-            "method": method.name,
-            "datatype": method.datatype,
-            "k": k,
-            "rescore": rescore,
-            "oversampling": oversampling,
-        }
+        {"method": method.name, "datatype": method.datatype, **cell.model_dump()}
         for method in settings.methods
-        for k, rescore, oversampling in settings.grid(method)
+        for cell in settings.grid(method)
     ]
     display(
         {
             "datasets": settings.datasets,
             "models": settings.models,
             "builds": settings.builds,
+            "split": settings.search.split,
+            "max_queries": settings.search.max_queries,
+            "repeats": settings.search.repeats,
+            "cache_state": settings.cache_state,
+            "require_telemetry": settings.require_telemetry,
+            "memory_limit_bytes": settings.memory_limit_bytes,
             "cells_per_workload_and_build": len(cells),
             "total_cells": len(cells)
             * settings.builds
             * len(settings.datasets)
             * len(settings.models),
-            "cache_state": "warm",
+            "selection": settings.selection,
             "matrix": cells,
         }
     )
@@ -65,31 +72,70 @@ def prepare(
     max_docs: Annotated[int | None, typer.Option(min=1)] = None,
     max_test_queries: Annotated[int | None, typer.Option(min=1)] = None,
 ) -> None:
-    """Download a frozen BEIR corpus, query splits, and relevance judgments."""
+    """Freeze one BEIR corpus, its judgments, and its supplied Cohere vectors."""
     prepare_dataset(
         dataset, output, revision, dev_queries, seed, max_docs, max_test_queries
     )
-    typer.echo(f"Prepared {output / dataset}")
+    typer.echo(
+        f"Prepared {output / dataset} and {output.parent / 'embeddings' / dataset / 'cohere'}"
+    )
+
+
+@app.command("prepare-all")
+def prepare_all_command(
+    data_root: Annotated[Path, typer.Option()] = Path("data"),
+    revision: Annotated[str, typer.Option()] = DATA_REVISION,
+    with_bge: Annotated[bool, typer.Option(help="Also embed with BGE-small")] = False,
+    bge_revision: Annotated[str, typer.Option()] = BGE_REVISION,
+    dev_queries: Annotated[int, typer.Option(min=1)] = 50,
+    seed: Annotated[int, typer.Option()] = 42,
+    batch_size: Annotated[int, typer.Option(min=1)] = 64,
+) -> None:
+    """Stage all four corpora, judgments, and Cohere arrays; skip complete ones."""
+    report = asyncio.run(
+        prepare_all(
+            data_root, revision, with_bge, bge_revision, dev_queries, seed, batch_size
+        )
+    )
+    display(report)
 
 
 @app.command()
 def embed(
     dataset: Annotated[str, typer.Option()],
-    model: Annotated[str, typer.Option(help="cohere or bge")],
+    model: Annotated[str, typer.Option(help="bge (Cohere vectors come from prepare)")],
     data_root: Annotated[Path, typer.Option()] = Path("data"),
-    revision: Annotated[str | None, typer.Option()] = None,
-    batch_size: Annotated[int, typer.Option(min=1, max=96)] = 64,
+    revision: Annotated[str, typer.Option()] = BGE_REVISION,
+    batch_size: Annotated[int, typer.Option(min=1)] = 64,
 ) -> None:
-    """Generate/checkpoint embeddings; Cohere calls use your paid API account."""
-    if model not in {"cohere", "bge"}:
-        raise ValueError("model must be cohere or bge")
+    """Generate and checkpoint local BGE embeddings for one prepared dataset."""
     output = data_root / "embeddings" / dataset / model
-    if model == "bge" and revision is None:
-        revision = BGE_REVISION
     asyncio.run(
         embed_dataset(data_root / "raw" / dataset, output, model, batch_size, revision)
     )
     typer.echo(f"Saved embeddings to {output}")
+
+
+@app.command()
+def readiness(
+    data_root: Annotated[Path, typer.Option()] = Path("data"),
+    require_all: Annotated[
+        bool, typer.Option(help="Fail unless every dataset/model artifact is ready")
+    ] = False,
+    datasets: Annotated[list[str] | None, typer.Option()] = None,
+    models: Annotated[list[str] | None, typer.Option()] = None,
+) -> None:
+    """Check hashes, dimensions, IDs, labels, and ground truth for each artifact."""
+    rows = [
+        artifact_status(data_root / "embeddings" / dataset / model, dataset, model)
+        for dataset in (datasets or list(DATASETS_IN_ORDER))
+        for model in (models or ["cohere", "bge"])
+    ]
+    statuses = {row["status"] for row in rows}
+    ready = "failed" not in statuses and (not require_all or statuses == {"ready"})
+    display({"ready": ready, "require_all": require_all, "artifacts": rows})
+    if not ready:
+        raise SystemExit(1)
 
 
 @app.command()
@@ -133,7 +179,7 @@ def run(
     data: Annotated[Path, typer.Option(exists=True)],
     output: Annotated[Path, typer.Option()],
 ) -> None:
-    """Run one model/dataset artifact through the selected warm-search matrix."""
+    """Run one model/dataset artifact through the configured search matrix."""
     asyncio.run(run_benchmark(load_config(config), data, output))
     typer.echo(f"Completed benchmark. Results: {output / 'summary.json'}")
 
@@ -143,6 +189,34 @@ def summarize(input: Annotated[Path, typer.Option(exists=True)]) -> None:
     """Aggregate results without combining distinct ablation settings."""
     result = summarize_run(input)
     display({"groups": len(result["groups"]), "path": str(input / "summary.json")})
+
+
+@app.command()
+def select(
+    input: Annotated[Path, typer.Option(exists=True, help="Complete dev tuning run")],
+    output: Annotated[Path, typer.Option(help="Frozen test-split config to write")],
+    base_config: Annotated[Path, typer.Option(exists=True)] = Path(
+        "configs/benchmark.yaml"
+    ),
+    recall_floor: Annotated[float, typer.Option(min=0, max=1)] = 0.95,
+    ndcg_tolerance: Annotated[float, typer.Option(min=0, max=1)] = 0.01,
+    latency_metric: Annotated[str, typer.Option()] = "server_ms_p95",
+) -> None:
+    """Freeze the fastest eligible dev point per method and k into a test config."""
+    if output.exists():
+        raise FileExistsError(f"Refusing to overwrite frozen selection {output}")
+    config = select_from_run(
+        input, load_config(base_config), recall_floor, ndcg_tolerance, latency_metric
+    )
+    save_config(output, config)
+    assert config.selection is not None
+    display(
+        {
+            "path": str(output),
+            "rule": config.selection["rule"],
+            "choices": config.selection["choices"],
+        }
+    )
 
 
 def main() -> None:
