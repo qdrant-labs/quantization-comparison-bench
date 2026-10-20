@@ -36,6 +36,18 @@ qbench_env() {
   fi
   local cgroup
   cgroup="/sys/fs/cgroup$(awk -F: '$1 == "0" {print $3}' "/proc/$pid/cgroup")"
+  # The image entrypoint is a shell that forks qdrant; measure the qdrant
+  # process itself, not the wrapper.
+  local candidate
+  for candidate in $(cat "$cgroup/cgroup.procs"); do
+    if [ "$(cat "/proc/$candidate/comm" 2>/dev/null)" = "qdrant" ]; then
+      pid="$candidate"
+    fi
+  done
+  if [ "$(cat "/proc/$pid/comm" 2>/dev/null)" != "qdrant" ]; then
+    echo "Could not find a qdrant process in $cgroup" >&2
+    return 1
+  fi
   export QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:6333}"
   export QDRANT_CONTAINER_ID="$container"
   export QDRANT_PID="$pid"

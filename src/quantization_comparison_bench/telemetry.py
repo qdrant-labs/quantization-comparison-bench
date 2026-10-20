@@ -82,9 +82,21 @@ def refresh_targets() -> dict[str, str]:
             cgroup = f"/sys/fs/cgroup{path}"
     if not cgroup:
         raise RuntimeError("Could not resolve a cgroup v2 path for the container")
+    pid = qdrant_process(Path(cgroup))
     os.environ["QDRANT_PID"] = pid
     os.environ["QDRANT_CGROUP_PATH"] = cgroup
     return {"QDRANT_PID": pid, "QDRANT_CGROUP_PATH": cgroup}
+
+
+def qdrant_process(cgroup: Path) -> str:
+    """The qdrant process inside the container cgroup, not its entrypoint shell."""
+    for candidate in (cgroup / "cgroup.procs").read_text().split():
+        try:
+            if (Path("/proc") / candidate / "comm").read_text().strip() == "qdrant":
+                return candidate
+        except OSError:
+            continue
+    raise RuntimeError(f"No qdrant process found in {cgroup}")
 
 
 def check_telemetry(memory_limit_bytes: int | None) -> dict[str, Any]:
@@ -115,6 +127,15 @@ def check_telemetry(memory_limit_bytes: int | None) -> dict[str, Any]:
             problems.append(f"{path}: {type(error).__name__}: {error}")
     if not (storage / "collections").is_dir():
         problems.append(f"{storage}/collections is not a readable directory")
+    try:
+        comm = (Path("/proc") / pid / "comm").read_text().strip()
+        if comm != "qdrant":
+            problems.append(
+                f"QDRANT_PID={pid} is {comm!r}, not the qdrant process; "
+                "re-source scripts/vm-env.sh"
+            )
+    except OSError as error:
+        problems.append(f"/proc/{pid}/comm: {type(error).__name__}: {error}")
     if problems:
         raise RuntimeError(
             "Telemetry sources are not readable by this account:\n  "
