@@ -87,13 +87,19 @@ and skips any stage that already completed:
 | `datatype` | `configs/datatype.yaml` | `turbo4` stored datatype versus float32 plus TurboQuant search copies |
 | `datatype-binary` | `configs/datatype-binary.yaml` | Binary retrieval rescored against `turbo4` storage versus against float32 originals |
 | `ablation` | `configs/ablation.yaml` | Fixed-effort rescoring/oversampling ablation plus the extended set: binary 1.5/2-bit, scalar-8 query encoding, TurboQuant 2/1.5/1-bit, product16 |
+| `throughput` | `selected.yaml` at concurrency 8 | Queries per second at the frozen points, with per-request latency under load |
+| `primary-full`, `selected-full` | same configs, `--max-queries 0` | SciFact and NFCorpus only: the whole official test split (300 and 323 queries) instead of 150 |
 
-Repeat for `scifact`, `nfcorpus`, `quora` and for `bge`, or run every step in
-order with `scripts/run-all.sh` inside tmux. The two extra
+Repeat for `scifact`, `nfcorpus`, `quora` and for `bge` and `bge_base`, or run
+every step in order with `scripts/run-all.sh` inside tmux. The third model,
+BGE-base-en-v1.5 at 768 dimensions, is staged with `prepare-all --with-bge-base`
+for SciFact, NFCorpus, and FiQA, so that dimensionality can be separated from
+model family when reading the binary quantization results. The two extra
 experiments are separate because they change the host condition:
 
 ```bash
 scripts/memory-pressure.sh                 # Quora/Cohere under a fixed 1 GiB container cap
+scripts/memory-pressure.sh results bge 512m configs/memory-pressure-bge.yaml   # Quora/BGE under 512 MiB
 QBENCH_ALLOW_CACHE_RESET=1 uv run qbench run --config configs/cold-start.yaml \
   --data data/embeddings/fiqa/cohere --output results/fiqa-cohere/cold-start
 ```

@@ -165,8 +165,41 @@ def test_build_report_writes_markdown_and_json(tmp_path: Path) -> None:
     assert "### primary — complete" in markdown
     assert "### memory-pressure — failed" in markdown
     assert "| turbo4 | 10 | ef 256, rescore on, ×2 | 0.970 | yes |" in markdown
-    assert "| turbo4 | 1/1 | 2 | 1 | 100 | 40 | 300 | 5 | 0 |" in markdown
+    assert (
+        "| turbo4 | 1/1 | 1 | 2 | 100 | 40 | 300 | n/a | n/a | n/a | n/a | 0 |"
+        in markdown
+    )
     data = json.loads((tmp_path / "report" / "report.json").read_text())
     macro = macro_average(data["workloads"])
     assert macro[0]["model"] == "cohere" and macro[0]["datasets"] == ["fiqa"]
     assert abs(macro[0]["recall"] - 0.95) < 1e-9
+
+
+def test_live_segment_storage_ignores_pre_merge_segments() -> None:
+    from quantization_comparison_bench.report import live_segment_storage
+
+    files = {
+        "0/segments/merged/vector_storage/matrix.dat": {"allocated_bytes": 2000},
+        "0/segments/merged/vector_storage/quantized.data": {"allocated_bytes": 500},
+        "0/segments/merged/vector_index/links_compressed.bin": {"allocated_bytes": 40},
+        "0/segments/merged/id_tracker.mappings": {"allocated_bytes": 5},
+        "0/segments/old-a/vector_storage/matrix.dat": {"allocated_bytes": 1000},
+        "0/segments/old-a/vector_storage/quantized.data": {"allocated_bytes": 250},
+        "0/segments/old-b/vector_storage/matrix.dat": {"allocated_bytes": 900},
+        "0/wal/closed-1": {"allocated_bytes": 32},
+    }
+    out = live_segment_storage({"files": files})
+    assert out["vectors"] == 2000 and out["quantized"] == 500 and out["hnsw"] == 40
+    assert out["other"] == 5 and out["wal"] == 32
+    assert out["segment_directories"] == 3 and out["live_total"] == 2545
+
+
+def test_throughput_fields_are_summarized() -> None:
+    rows = [
+        {**record("a", 0, 0, 1.0, 0.0, 1.0), "concurrency": 8, "pass_qps": 1200.0},
+        {**record("b", 0, 0, 1.0, 0.0, 1.0), "concurrency": 8, "pass_qps": 1200.0},
+        {**record("a", 0, 1, 1.0, 0.0, 1.0), "concurrency": 8, "pass_qps": 1000.0},
+        {**record("b", 0, 1, 1.0, 0.0, 1.0), "concurrency": 8, "pass_qps": 1000.0},
+    ]
+    (group,) = summarize_groups(rows)
+    assert group["concurrency"] == 8 and group["qps"] == 1100.0

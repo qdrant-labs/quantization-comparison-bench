@@ -7,8 +7,10 @@
 # 1. Small workloads: scifact and nfcorpus, both models (needs prepared data).
 # 2. Stage fiqa and quora with BGE (no timing runs while embedding).
 # 3. Large workloads: fiqa and quora, both models.
-# 4. Memory-pressure run (Quora/Cohere, 1 GiB cap), restore the cap, then
-#    cold-start runs for every artifact.
+# 4. Memory-pressure runs (Quora/Cohere at 1 GiB, Quora/BGE at 512 MiB),
+#    restore the cap, then cold-start runs for every artifact.
+# 5. Third model: stage BGE-base (768-d) for scifact, nfcorpus, and fiqa and
+#    run those workloads.
 #
 # Run as the repository owner; measured stages use sudo because the Qdrant
 # process runs as root inside the container.
@@ -69,9 +71,14 @@ done
 
 log "step 4a: memory pressure"
 if complete "$root/quora-cohere/memory-pressure"; then
-  log "memory pressure already complete"
+  log "memory pressure (cohere) already complete"
 else
-  as_root "scripts/memory-pressure.sh $root"
+  as_root "scripts/memory-pressure.sh $root cohere 1g configs/memory-pressure.yaml"
+fi
+if complete "$root/quora-bge/memory-pressure-bge"; then
+  log "memory pressure (bge) already complete"
+else
+  as_root "scripts/memory-pressure.sh $root bge 512m configs/memory-pressure-bge.yaml"
 fi
 set_cap 28g
 
@@ -87,6 +94,12 @@ for dataset in scifact nfcorpus fiqa quora; do
     [ -d "$out" ] && { log "$out exists but is incomplete; move it aside"; exit 1; }
     as_root "source scripts/vm-env.sh $root/environment && uv run qbench run --config configs/cold-start.yaml --data data/embeddings/$dataset/$model --output $out"
   done
+done
+log "step 5: third model, BGE-base 768-d"
+uv sync --locked --extra bge
+uv run qbench prepare-all --with-bge-base --datasets scifact --datasets nfcorpus --datasets fiqa
+for dataset in scifact nfcorpus fiqa; do
+  workload "$dataset" bge_base
 done
 sudo chown -R "$(id -u):$(id -g)" "$root"
 log "all steps complete under $root"

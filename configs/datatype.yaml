@@ -3,7 +3,7 @@
 # restore float32 precision, so rescoring off/on is kept for every pair.
 expected_qdrant_version: "1.19.2"
 datasets: [fiqa, scifact, nfcorpus, quora]
-models: [cohere, bge]
+models: [cohere, bge, bge_base]
 builds: 3
 seed: 42
 hnsw:

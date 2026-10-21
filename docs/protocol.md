@@ -16,15 +16,19 @@ Four English BEIR datasets, each evaluated separately: FiQA, SciFact,
 NFCorpus, Quora. Cohere `embed-english-v3.0` vectors (1,024 dimensions) are
 imported from the pinned Hugging Face dataset revision; `BAAI/bge-small-en-v1.5`
 vectors (384 dimensions) are generated locally for the same document and query
-IDs. No embedding API calls are required. Revisions, source file hashes,
+IDs. A third model, `BAAI/bge-base-en-v1.5` (768 dimensions, commit
+`a5beb1e3e68b9ab74eb54cfd186867f64f240e1a`), is generated for SciFact, NFCorpus,
+and FiQA so that a dimensionality effect can be told apart from a model-family
+effect within one family. No embedding API calls are required. Revisions, source file hashes,
 normalized float32 arrays, ordered IDs, judgments, split assignments, and
 preprocessing details are saved under `data/` in the benchmark checkout and
 are listed in every run manifest. See [data](data.md).
 
 Fifty seeded development queries per dataset come from the official dev split
 (train for SciFact). Default measurements use 150 seeded queries from the
-official test split, held out during tuning; the full test split stays
-available for extended runs. Self matches are excluded consistently,
+official test split, held out during tuning. For SciFact and NFCorpus the
+primary comparison and the frozen points are also run on the whole official
+test split (300 and 323 queries) to tighten the intervals. Self matches are excluded consistently,
 especially for Quora. Original BEIR relevance grades are preserved.
 
 Differences between the two models include the embedding model and vector
@@ -96,20 +100,22 @@ configurations fail; they are never silently replaced.
   before indexing, after indexing, and after search. Indexing and query
   intervals are separate; overlapping counters are never summed.
 - **Storage**: allocated and logical collection bytes by file while the
-  collection exists, classified into vectors, quantized data, HNSW, payload,
-  and WAL during analysis.
+  collection exists, after the optimizer has dropped pre-merge segments,
+  classified into originals, quantized copy, HNSW, and WAL from the live segment.
 - **I/O**: per-query CPU and vector/payload I/O read counters from the server,
   process read/write bytes, minor/major page faults, and cgroup `io.stat`
   before and after every pass.
 
 Five measured warm passes and three independently built indexes for the
-primary comparison. Per-query records are retained; paired uncertainty across
+primary comparison. A separate throughput stage reruns the frozen points at
+concurrency 8 and reports queries per second with per-request latency. Per-query records are retained; paired uncertainty across
 queries and build variation are reported instead of single-run precision.
 
 ## Memory pressure and cache state
 
 `configs/memory-pressure.yaml` runs Quora/Cohere with a fixed 1 GiB container
-cap, below the roughly 2 GiB float32 corpus. The same cap applies to every
+cap, below the roughly 2 GiB float32 corpus, and `configs/memory-pressure-bge.yaml`
+runs Quora/BGE-small at 512 MiB, below its roughly 0.8 GiB corpus. The same cap applies to every
 method; OOMs, timeouts, and build failures are recorded as outcomes. The
 runner checks the effective cgroup limit and requires VM telemetry before
 starting.

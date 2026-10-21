@@ -1,0 +1,31 @@
+# Quora/BGE-small under a fixed 512 MiB container cap, below the ~0.8 GiB
+# float32 corpus, the BGE counterpart of memory-pressure.yaml. The run refuses to start unless the cgroup memory.max equals this
+# value and VM telemetry is readable. Record OOMs, timeouts, and build
+# failures as outcomes; do not relax the cap per method.
+expected_qdrant_version: "1.19.2"
+datasets: [quora]
+models: [bge]
+builds: 1
+seed: 42
+require_telemetry: true
+memory_limit_bytes: 536870912
+indexing_timeout_seconds: 14400
+hnsw:
+  m: 16
+  ef_construct: 100
+  max_indexing_threads: 8
+search:
+  ks: [10, 100]
+  hnsw_ef: [256]
+  rescoring: [true]
+  oversampling: [2]
+  split: test
+  max_queries: 150
+  warmup_queries: 50
+  repeats: 5
+methods:
+  - {name: float32, quantizer: none}
+  - {name: scalar8, quantizer: scalar, quantile: 0.99}
+  - {name: binary1, quantizer: binary, query_encoding: binary}
+  - {name: product8, quantizer: product, compression: x8}
+  - {name: turbo4, quantizer: turbo, bits: 4}

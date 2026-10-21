@@ -3,7 +3,7 @@
 # 2/1.5/1-bit) and product16. Test split, hnsw_ef 256.
 expected_qdrant_version: "1.19.2"
 datasets: [fiqa, scifact, nfcorpus, quora]
-models: [cohere, bge]
+models: [cohere, bge, bge_base]
 builds: 3
 seed: 42
 hnsw:

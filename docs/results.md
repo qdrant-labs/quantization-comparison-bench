@@ -24,9 +24,17 @@ For the final analysis, pair each method's quality observations with its baselin
 
 ## Resource and latency interpretation
 
+Measure after the optimizer has finished. Right after the index turns green the
+merged segment and the pre-merge segments it was built from can coexist, on disk
+and in memory, so a snapshot at that moment double counts the originals and the
+pinned quantized copy. The runner now waits until the segment directory count
+matches the collection's live segment count before the post-index snapshot; for
+older runs, the report uses the post-search heap delta as the steady-state figure
+and classifies storage from the largest (merged) segment only.
+
 Three memory views are recorded on purpose, and they answer different questions:
 
-- **Allocator heap** (`server-memory-*.json`, `footprint.json`): Qdrant's jemalloc gauges from `/metrics`, with deltas from the pre-index snapshot to after indexing and after search. This is the `heap_mb` figure of the modern-quantization-bench reference. It excludes memory-mapped file pages, so pages read back for rescoring are not in it.
+- **Allocator heap** (`server-memory-*.json`, `footprint.json`): Qdrant's jemalloc gauges from `/metrics`, with deltas from the pre-index snapshot to after indexing and after search. The post-search delta is the steady-state cost of the quantized copy and matched its theoretical size within 5 to 10% on every method; the post-index delta is roughly double when it was taken before segment cleanup. This is the `heap_mb` figure of the modern-quantization-bench reference. It excludes memory-mapped file pages, so pages read back for rescoring are not in it.
 - **Process RSS** with its anonymous/file-backed split (`memory-*.json`, `resources.jsonl`): what the process actually holds, including mapped original vectors that were touched.
 - **Cgroup current/peak** and `memory.stat`: what the container is charged for, including page cache. This is what a deployment needs in RAM.
 
@@ -36,9 +44,17 @@ Report server processing time and client wall-clock time separately. The timed q
 
 Keep warm, cold-start, and controlled cold-request results separate. Cold-start records carry `cache_state: cold_start` and a per-query `position` within the pass; the first queries after a reset are the cold ones. Restarting a process does not clear the OS page cache. Only label a run controlled cold when the cache-reset procedure and disk/page-fault counters support that claim. Managed environments without cache control can report observed conditions.
 
-Use process RSS and container memory counters as separate measurements; they overlap and must not be summed. Record anonymous and file-backed memory where available, build peaks separately from search peaks, and rescoring's page reads. A before/after snapshot is not a peak measurement; use the container's peak counter or a sampled time series. Report collection disk usage including originals, quantized copies, HNSW, payload, and WAL, and identify the measurement tool and whether it counts allocated or apparent bytes.
+Use process RSS and container memory counters as separate measurements; they overlap and must not be summed. Record anonymous and file-backed memory where available, build peaks separately from search peaks, and rescoring's page reads. A before/after snapshot is not a peak measurement; use the container's peak counter or a sampled time series. Report collection disk usage as originals, quantized copy, HNSW, and WAL from the live segment, and identify the measurement tool and whether it counts allocated or apparent bytes. `storage.json` keeps every file so the classification can be checked.
 
 Compare configurations at both fixed requested settings and a development-selected quality target. List failures and quality-target misses. Hardware, memory caps, index settings, cache procedures, embedding checksums, and server/client versions belong beside the results so readers can reproduce the trade-offs.
+
+## Throughput
+
+`search.concurrency` above one opens that many query connections and splits each
+pass across them. Every record keeps its own client and server latency, and the
+pass records its wall-clock queries per second (`pass_qps`), averaged per group
+as `qps`. Concurrency one remains the latency protocol; the `throughput` stage
+reruns the frozen points at concurrency 8.
 
 ## Building the tables
 
@@ -57,4 +73,6 @@ per-build recall. Latency percentiles pool all measured requests. Memory and
 storage rows average across builds and keep the peak for peak counters. Runs
 with a `failed` manifest are listed with their error type and whatever methods
 completed before the failure. The macro-average table at the end gives every
-dataset equal weight and is a secondary summary only.
+dataset equal weight and is a secondary summary only. `tuning-grid-<workload>.csv`
+exports the development sweep (recall and p95 by method, `hnsw_ef`, rescoring,
+and oversampling) for charts that show the shape of each method's trade-off.
