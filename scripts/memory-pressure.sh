@@ -17,8 +17,12 @@ config="${4:-configs/memory-pressure.yaml}"
 stage="$(basename "$config" .yaml)"
 out="$root/quora-$model/$stage"
 if [ -e "$out" ]; then
-  echo "$out already exists; move it aside before rerunning" >&2
-  exit 1
+  if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["status"] == "complete" else 1)' "$out/manifest.json" 2>/dev/null; then
+    echo "$out already complete"; exit 0
+  fi
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  echo "$out is incomplete; keeping it as $out-failed-$stamp and rerunning"
+  mv "$out" "$out-failed-$stamp"
 fi
 [ -f .env ] || cp .env.example .env
 if grep -q '^QDRANT_MEMORY_LIMIT=' .env; then

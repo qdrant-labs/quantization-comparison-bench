@@ -519,7 +519,41 @@ async def measure_method(
             await sampler
         finally:
             if created:
-                await request(client, "DELETE", f"/collections/{collection}")
+                try:
+                    await request(client, "DELETE", f"/collections/{collection}")
+                except (httpx.HTTPError, RuntimeError) as error:
+                    # The server may be restarting after an OOM kill; the run
+                    # removes leftover collections once it is back.
+                    write_json(
+                        directory / "cleanup-deferred.json",
+                        {"error": f"{type(error).__name__}: {error}"},
+                    )
+
+
+async def wait_for_server(
+    client: httpx.AsyncClient, expected_version: str, timeout_seconds: float
+) -> dict[str, Any]:
+    """Wait for the server to answer again, for example after an OOM restart."""
+    started = time.monotonic()
+    while time.monotonic() - started < timeout_seconds:
+        try:
+            root = await request(client, "GET", "/")
+            if root["version"] == expected_version:
+                return root
+        except (httpx.HTTPError, RuntimeError):
+            pass
+        await asyncio.sleep(2)
+    raise TimeoutError("Qdrant did not come back after the failure")
+
+
+async def remove_run_collections(client: httpx.AsyncClient, run_id: str) -> list[str]:
+    listing = await request(client, "GET", "/collections")
+    removed = []
+    for entry in listing["result"]["collections"]:
+        if entry["name"].startswith(f"qb_{run_id}_"):
+            await request(client, "DELETE", f"/collections/{entry['name']}")
+            removed.append(entry["name"])
+    return removed
 
 
 def summarize(output: Path) -> dict[str, Any]:
@@ -616,23 +650,59 @@ async def run_benchmark(config: Benchmark, data_path: Path, output: Path) -> Non
             "selection": config.selection,
         }
         write_json(output / "manifest.json", manifest)
+        manifest["method_failures"] = []
         try:
             for build in range(config.builds):
                 methods = config.methods.copy()
                 random.Random(config.seed + build).shuffle(methods)
                 for method in methods:
-                    await measure_method(
-                        client,
-                        connection,
-                        data,
-                        ground_truth,
-                        indices,
-                        config,
-                        method,
-                        build,
-                        run_id,
-                        output,
-                    )
+                    try:
+                        await measure_method(
+                            client,
+                            connection,
+                            data,
+                            ground_truth,
+                            indices,
+                            config,
+                            method,
+                            build,
+                            run_id,
+                            output,
+                        )
+                    except Exception as error:
+                        if config.memory_limit_bytes is None:
+                            raise
+                        # Under a memory cap an OOM kill or build timeout is a
+                        # result. Record it, wait for the server, clean up, go on.
+                        failure = {
+                            "build": build,
+                            "method": method.name,
+                            "error_type": type(error).__name__,
+                            "message": str(error)[:2000],
+                            "unix_seconds": time.time(),
+                            "host": host_memory(),
+                        }
+                        await connection.close()
+                        root = await wait_for_server(
+                            client,
+                            config.expected_qdrant_version,
+                            config.indexing_timeout_seconds,
+                        )
+                        if config.require_telemetry:
+                            failure["telemetry"] = await asyncio.to_thread(
+                                refresh_targets
+                            )
+                        failure["removed_collections"] = await remove_run_collections(
+                            client, run_id
+                        )
+                        failure["server_after"] = root
+                        manifest["method_failures"].append(failure)
+                        write_json(output / "manifest.json", manifest)
+                        print(
+                            f"build={build} method={method.name} failed: "
+                            f"{type(error).__name__}; continuing",
+                            flush=True,
+                        )
             summarize(output)
             manifest["status"] = "complete"
         except Exception as error:

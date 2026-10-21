@@ -281,6 +281,7 @@ def run_report(run: Path) -> dict[str, Any]:
         "telemetry": manifest.get("telemetry"),
         "groups": summarize_groups(records),
         "resources": resources(run),
+        "method_failures": manifest.get("method_failures") or [],
     }
     if manifest.get("selection"):
         report["selection"] = manifest["selection"]
@@ -548,6 +549,13 @@ def render_markdown(
                 + f", Qdrant {report.get('server_version')}, commit {str(report.get('git_revision'))[:10]}"
             )
             out.append("")
+            for failure in report.get("method_failures") or []:
+                out.append(
+                    f"Failure, build {failure['build']}, {failure['method']}: "
+                    f"{failure['error_type']} ({failure['message'][:160]})"
+                )
+            if report.get("method_failures"):
+                out.append("")
             if not report["groups"]:
                 out += ["No measured requests.", ""]
                 continue
