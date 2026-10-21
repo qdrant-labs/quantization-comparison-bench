@@ -10,6 +10,7 @@ Latency percentiles pool every measured request. Nothing is interpolated.
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -19,12 +20,52 @@ import yaml
 
 STAGES = (
     "primary",
+    "primary-full",
     "selected",
+    "selected-full",
+    "throughput",
     "datatype",
+    "datatype-binary",
     "ablation",
     "cold-start",
     "memory-pressure",
+    "memory-pressure-bge",
 )
+SEGMENT = re.compile(r"^0/segments/([^/]+)/")
+
+
+def live_segment_storage(storage: dict[str, Any]) -> dict[str, Any]:
+    """Bytes of the merged segment only, by component, plus the WAL.
+
+    Right after indexing the optimizer may not have deleted the pre-merge
+    segments yet, so summing every file double counts the originals and the
+    quantized copy. The largest segment is the merged one.
+    """
+    segments: dict[str, dict[str, int]] = defaultdict(dict)
+    wal = 0
+    for name, entry in (storage.get("files") or {}).items():
+        allocated = int(entry["allocated_bytes"])
+        if "/wal/" in name:
+            wal += allocated
+        elif match := SEGMENT.match(name):
+            segments[match.group(1)][name] = allocated
+    out = {"vectors": 0, "quantized": 0, "hnsw": 0, "other": 0, "wal": wal}
+    if segments:
+        live = max(segments.values(), key=lambda files: sum(files.values()))
+        for name, allocated in live.items():
+            if "quantized" in name:
+                out["quantized"] += allocated
+            elif "vector_index" in name:
+                out["hnsw"] += allocated
+            elif "vector_storage" in name:
+                out["vectors"] += allocated
+            else:
+                out["other"] += allocated
+    out["segment_directories"] = len(segments)
+    out["live_total"] = out["vectors"] + out["quantized"] + out["hnsw"] + out["other"]
+    return out
+
+
 GROUP = ("config", "k", "hnsw_ef", "rescore", "oversampling", "cache_state")
 COLD_HEAD = 10  # first requests of a cold-start pass reported separately
 
@@ -115,6 +156,13 @@ def summarize_groups(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for metric in ("cpu", "vector_io_read", "payload_io_read"):
             values = [float(m[metric]) for m in members if m.get(metric) is not None]
             row[f"{metric}_per_query"] = float(np.mean(values)) if values else None
+        row["concurrency"] = max(int(m.get("concurrency") or 1) for m in members)
+        qps = {
+            (int(m["build"]), int(m["repeat"])): float(m["pass_qps"])
+            for m in members
+            if m.get("pass_qps") is not None
+        }
+        row["qps"] = float(np.mean(list(qps.values()))) if qps else None
         if key[GROUP.index("cache_state")] == "cold_start":
             head = [
                 float(m["server_ms"])
@@ -169,6 +217,10 @@ def resources(run: Path) -> list[dict[str, Any]]:
             )
             storage = _read_json(method_dir / "storage.json") or {}
             entry["storage_allocated_bytes"] = storage.get("allocated_bytes")
+            live = live_segment_storage(storage) if storage.get("files") else {}
+            for key in ("vectors", "quantized", "hnsw", "wal", "live_total"):
+                entry[f"storage_{key}_bytes"] = live.get(key)
+            entry["segment_directories"] = live.get("segment_directories")
             for stage in ("pre-index", "post-index", "post-search"):
                 snapshot = _read_json(method_dir / f"memory-{stage}.json") or {}
                 label = stage.replace("-", "_")
@@ -327,6 +379,7 @@ def _quality_table(groups: list[dict[str, Any]], show_point: bool) -> list[str]:
             "ΔnDCG@10 [95% CI]",
             "Server p50 / p95 ms",
             "Client p95 ms",
+            "QPS @ concurrency",
             "CPU / query",
             "Vector reads / query",
         ]
@@ -346,6 +399,7 @@ def _quality_table(groups: list[dict[str, Any]], show_point: bool) -> list[str]:
                 f"{g['delta_ndcg_at_10']:+.3f}" + _ci(g["delta_ndcg_ci95"]),
                 f"{_f(g['server_ms']['p50'], 2)} / {_f(g['server_ms']['p95'], 2)}",
                 _f(g["request_ms"]["p95"], 2),
+                f"{_f(g.get('qps'), 0)} @ {g.get('concurrency', 1)}",
                 _f(g["cpu_per_query"], 0),
                 _f(g["vector_io_read_per_query"], 0),
             ]
@@ -358,12 +412,15 @@ def _resource_table(rows: list[dict[str, Any]]) -> list[str]:
     header = [
         "Method",
         "Builds",
-        "Heap Δ after index MB",
-        "Heap Δ after search MB",
+        "Heap Δ steady MB",
+        "Heap Δ before cleanup MB",
         "RSS after search MB",
         "RSS file-backed MB",
         "cgroup peak MB",
-        "Storage MB",
+        "Originals MB",
+        "Quantized copy MB",
+        "HNSW MB",
+        "WAL MB",
         "Major faults (search)",
     ]
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
@@ -379,12 +436,15 @@ def _resource_table(rows: list[dict[str, Any]]) -> list[str]:
                 [
                     r["config"],
                     f"{r['complete_builds']}/{r['builds']}",
-                    _mb(r.get("heap_post_index_bytes")),
                     _mb(r.get("heap_post_search_bytes")),
+                    _mb(r.get("heap_post_index_bytes")),
                     _mb(r.get("rss_post_search_bytes")),
                     _mb(r.get("rss_file_post_search_bytes")),
                     _mb(r.get("cgroup_peak_post_search_bytes")),
-                    _mb(r.get("storage_allocated_bytes")),
+                    _mb(r.get("storage_vectors_bytes")),
+                    _mb(r.get("storage_quantized_bytes")),
+                    _mb(r.get("storage_hnsw_bytes")),
+                    _mb(r.get("storage_wal_bytes")),
                     _f(faults, 0),
                 ]
             )
@@ -479,6 +539,9 @@ def render_markdown(
         out += [f"## {name}", ""]
         for stage, report in entry["stages"].items():
             status = report["status"]
+            if stage == "selected-full" or stage == "primary-full":
+                out.append("Full official test split (extended run).")
+                out.append("")
             out.append(
                 f"### {stage} — {status}"
                 + (f" ({report['error_type']})" if report.get("error_type") else "")
@@ -513,6 +576,51 @@ def render_markdown(
     return "\n".join(out)
 
 
+def tuning_grid(results: Path, output: Path) -> list[str]:
+    """CSV per workload of the dev sweep: recall and p95 by method, hnsw_ef, and oversampling."""
+    written = []
+    for workload in sorted(p for p in results.iterdir() if p.is_dir()):
+        summary = workload / "tuning" / "summary.json"
+        if (
+            workload.name.startswith(("environment", "pipeline-test", "smoke"))
+            or not summary.is_file()
+        ):
+            continue
+        groups = json.loads(summary.read_text())["groups"]
+        lines = [
+            "method,k,hnsw_ef,rescore,oversampling,recall,ndcg_delta,server_p95_ms,server_p50_ms"
+        ]
+        for g in sorted(
+            groups,
+            key=lambda g: (
+                g["config"],
+                g["k"],
+                g["hnsw_ef"],
+                str(g["rescore"]),
+                g["oversampling"] or 0,
+            ),
+        ):
+            lines.append(
+                ",".join(
+                    [
+                        g["config"],
+                        str(g["k"]),
+                        str(g["hnsw_ef"]),
+                        "" if g["rescore"] is None else str(g["rescore"]).lower(),
+                        "" if g["oversampling"] is None else f"{g['oversampling']:g}",
+                        f"{g['mean_ann_recall']:.4f}",
+                        f"{g['mean_ndcg_at_10'] - g['mean_exact_ndcg_at_10']:+.4f}",
+                        f"{g['server_ms_p95']:.3f}",
+                        f"{g['server_ms_p50']:.3f}",
+                    ]
+                )
+            )
+        path = output / f"tuning-grid-{workload.name}.csv"
+        path.write_text("\n".join(lines) + "\n")
+        written.append(str(path))
+    return written
+
+
 def build_report(results: Path, output: Path) -> dict[str, Any]:
     reports = workload_reports(results)
     macro = macro_average(reports)
@@ -530,4 +638,5 @@ def build_report(results: Path, output: Path) -> dict[str, Any]:
         },
         "markdown": str(output / "report.md"),
         "json": str(output / "report.json"),
+        "tuning_grids": tuning_grid(results, output),
     }

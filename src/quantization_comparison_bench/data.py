@@ -16,6 +16,11 @@ from numpy.typing import NDArray
 
 DATASET_SOURCE = "CohereLabs/beir-embed-english-v3"
 BGE_MODEL = "BAAI/bge-small-en-v1.5"
+# Local sentence-transformers models by label: (Hugging Face ID, dimensions).
+LOCAL_MODELS = {
+    "bge": ("BAAI/bge-small-en-v1.5", 384),
+    "bge_base": ("BAAI/bge-base-en-v1.5", 768),
+}
 # The source dataset ships vectors from this hosted model; no API calls are made.
 COHERE_MODEL = "embed-english-v3.0"
 COHERE_DIMENSIONS = 1024
@@ -452,6 +457,7 @@ async def prepare_all(
     seed: int = 42,
     batch_size: int = 64,
     datasets: Iterable[str] = DATASETS_IN_ORDER,
+    extra_models: dict[str, str] | None = None,
 ) -> list[dict[str, object]]:
     """Stage every corpus, its judgments, and Cohere arrays; optionally BGE."""
     report: list[dict[str, object]] = []
@@ -480,6 +486,13 @@ async def prepare_all(
             else:
                 await embed_dataset(raw, bge, "bge", batch_size, bge_revision)
                 entry["bge"] = "embedded"
+        for label, model_revision in (extra_models or {}).items():
+            target = data_root / "embeddings" / dataset / label
+            if artifact_complete(target):
+                entry[label] = "present"
+            else:
+                await embed_dataset(raw, target, label, batch_size, model_revision)
+                entry[label] = "embedded"
         report.append(entry)
     return report
 
@@ -599,8 +612,9 @@ async def embed_dataset(
             "Cohere embed-english-v3.0 vectors are imported by `qbench prepare`; "
             "no embedding API calls are made."
         )
-    if model != "bge":
-        raise ValueError("model must be 'bge'.")
+    if model not in LOCAL_MODELS:
+        raise ValueError(f"model must be one of {sorted(LOCAL_MODELS)}.")
+    model_id, dimensions = LOCAL_MODELS[model]
     if batch_size < 1:
         raise ValueError("batch_size must be positive.")
     if max_documents is not None:
@@ -621,9 +635,9 @@ async def embed_dataset(
     library_versions = _embedding_versions(model)
     config: dict[str, object] = {
         "dataset": dataset,
-        "model": BGE_MODEL,
+        "model": model_id,
         "model_revision": revision,
-        "dimensions": 384,
+        "dimensions": dimensions,
         "corpus_input_type": "search_query"
         if dataset == "quora"
         else "search_document",
@@ -656,7 +670,7 @@ async def embed_dataset(
     except ImportError as error:
         raise RuntimeError("Install BGE support with: uv sync --extra bge") from error
     encoder = await asyncio.to_thread(
-        SentenceTransformer, BGE_MODEL, revision=revision, device="cpu"
+        SentenceTransformer, model_id, revision=revision, device="cpu"
     )
     encoder.float()
     encoder.eval()

@@ -102,6 +102,9 @@ class Search(Settings):
     repeats: int = Field(default=5, ge=1)
     # Seeded query subset taken from the split; None uses the whole split.
     max_queries: int | None = Field(default=None, ge=1)
+    # Parallel client connections per measured pass. 1 is the latency protocol;
+    # larger values measure throughput and record per-pass queries per second.
+    concurrency: int = Field(default=1, ge=1, le=64)
 
     @model_validator(mode="after")
     def check_grid(self) -> Self:

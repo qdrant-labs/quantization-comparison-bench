@@ -11,6 +11,9 @@
 #   datatype  turbo4 stored-datatype comparison (configs/datatype.yaml)
 #   datatype-binary  binary retrieval rescored against turbo4 storage
 #   ablation  fixed-effort rescoring/oversampling ablation (configs/ablation.yaml)
+#   throughput  the frozen points at concurrency 8 (queries per second)
+#   primary-full, selected-full  scifact and nfcorpus only: the whole official
+#             test split instead of the 150-query subset
 #
 # Source scripts/vm-env.sh first so telemetry targets are exported.
 set -euo pipefail
@@ -32,6 +35,7 @@ complete() {
 
 run_stage() {
   local name="$1" config="$2"
+  shift 2
   if complete "$out/$name"; then
     echo "[$dataset/$model] $name already complete; skipping"
     return
@@ -40,8 +44,8 @@ run_stage() {
     echo "[$dataset/$model] $name exists but is not complete; move it aside before rerunning" >&2
     exit 1
   fi
-  echo "[$dataset/$model] $name: $config"
-  uv run qbench run --config "$config" --data "$data" --output "$out/$name"
+  echo "[$dataset/$model] $name: $config $*"
+  uv run qbench run --config "$config" --data "$data" --output "$out/$name" "$@"
 }
 
 mkdir -p "$out"
@@ -60,4 +64,11 @@ run_stage selected "$out/selected.yaml"
 run_stage datatype configs/datatype.yaml
 run_stage datatype-binary configs/datatype-binary.yaml
 run_stage ablation configs/ablation.yaml
+run_stage throughput "$out/selected.yaml" --concurrency 8
+case "$dataset" in
+  scifact|nfcorpus)
+    run_stage primary-full configs/benchmark.yaml --max-queries 0
+    run_stage selected-full "$out/selected.yaml" --max-queries 0
+    ;;
+esac
 echo "[$dataset/$model] workload complete under $out"

@@ -119,3 +119,13 @@ def test_indexing_threads_are_explicit_and_shared() -> None:
     for path in CONFIGS:
         if path.stem != "smoke":
             assert load_config(path).hnsw.max_indexing_threads == 8, path
+
+
+def test_concurrency_is_bounded_and_defaults_to_one() -> None:
+    assert Benchmark(methods=[Method(name="float32")]).search.concurrency == 1
+    with pytest.raises(ValidationError):
+        Benchmark(methods=[Method(name="float32")], search={"concurrency": 0})
+    assert (
+        load_config(Path("configs/memory-pressure-bge.yaml")).memory_limit_bytes
+        == 512 * 1024 * 1024
+    )

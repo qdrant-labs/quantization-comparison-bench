@@ -2,7 +2,7 @@
 # as results; they choose the frozen settings evaluated on the test split.
 expected_qdrant_version: "1.19.2"
 datasets: [fiqa, scifact, nfcorpus, quora]
-models: [cohere, bge]
+models: [cohere, bge, bge_base]
 builds: 1
 seed: 42
 hnsw:

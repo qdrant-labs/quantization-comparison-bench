@@ -164,6 +164,40 @@ async def wait_for_collection(
     raise TimeoutError(f"Collection {name} did not become ready")
 
 
+def segment_directories(collection: str) -> int | None:
+    root = os.environ.get("QDRANT_STORAGE_PATH")
+    if not root:
+        return None
+    path = Path(root) / "collections" / collection / "0" / "segments"
+    return sum(1 for item in path.iterdir() if item.is_dir()) if path.is_dir() else None
+
+
+async def wait_for_cleanup(
+    client: httpx.AsyncClient, name: str, settle_seconds: float = 600
+) -> dict[str, Any]:
+    """Wait until the optimizer has dropped pre-merge segments.
+
+    Right after the index turns green the merged segment and its sources can
+    coexist on disk and in memory, which double counts storage and pinned
+    quantized copies. Measure only once the directory count matches the
+    collection's live segment count.
+    """
+    started = time.monotonic()
+    while True:
+        state = (await request(client, "GET", f"/collections/{name}"))["result"]
+        live = int(state["segments_count"])
+        on_disk = segment_directories(name)
+        settled = on_disk is None or on_disk <= live
+        if settled or time.monotonic() - started > settle_seconds:
+            return {
+                "segments_live": live,
+                "segment_directories": on_disk,
+                "settled": settled,
+                "seconds": time.monotonic() - started,
+            }
+        await asyncio.sleep(2)
+
+
 async def create_collection(
     client: httpx.AsyncClient,
     name: str,
@@ -193,6 +227,7 @@ async def create_collection(
         len(data.corpus_ids),
         time.monotonic() + config.indexing_timeout_seconds,
     )
+    state["cleanup"] = await wait_for_cleanup(client, name)
     write_json(output / "collection.json", state)
 
 
@@ -305,16 +340,48 @@ async def measure_cell(
             _, pass_record["server_before"] = await server_metrics(client, collection)
             order = indices.copy()
             random.Random(config.seed + repeat).shuffle(order)
-            for position, row in enumerate(order):
-                query_id = data.query_ids[row]
-                ids, client_ms, server_ms, usage = await query(
-                    connection,
-                    collection,
-                    data,
-                    row,
-                    cell,
-                    corpus_positions.get(query_id),
+            workers = config.search.concurrency
+            pass_started = time.perf_counter()
+
+            async def run_worker(
+                worker_connection: QueryConnection, slots: list[tuple[int, int]]
+            ) -> list[tuple[int, int, list[str], float, float, dict[str, int] | None]]:
+                results = []
+                for position, row in slots:
+                    ids, client_ms, server_ms, usage = await query(
+                        worker_connection,
+                        collection,
+                        data,
+                        row,
+                        cell,
+                        corpus_positions.get(data.query_ids[row]),
+                    )
+                    results.append((position, row, ids, client_ms, server_ms, usage))
+                return results
+
+            if workers == 1:
+                outcomes = await run_worker(connection, list(enumerate(order)))
+            else:
+                pool = [query_connection() for _ in range(workers)]
+                try:
+                    parts = await asyncio.gather(
+                        *(
+                            run_worker(pool[i], list(enumerate(order))[i::workers])
+                            for i in range(workers)
+                        )
+                    )
+                finally:
+                    for extra in pool:
+                        await extra.close()
+                outcomes = sorted(
+                    (item for part in parts for item in part), key=lambda t: t[0]
                 )
+            pass_seconds = time.perf_counter() - pass_started
+            pass_record["pass_seconds"] = pass_seconds
+            pass_record["pass_qps"] = len(order) / pass_seconds
+            pass_record["concurrency"] = workers
+            for position, row, ids, client_ms, server_ms, usage in outcomes:
+                query_id = data.query_ids[row]
                 recall, ndcg = quality_metric(
                     ids, ground_truth[query_id], data.qrels[query_id], cell.k
                 )
@@ -346,6 +413,8 @@ async def measure_cell(
                     "unix_seconds": time.time(),
                     "request_ms": client_ms,
                     "server_ms": server_ms,
+                    "concurrency": workers,
+                    "pass_qps": len(order) / pass_seconds,
                     **{field: None for field in HARDWARE_FIELDS},
                     **(usage or {}),
                 }
@@ -541,7 +610,7 @@ async def run_benchmark(config: Benchmark, data_path: Path, output: Path) -> Non
             "platform": platform.platform(),
             "cpu_count": os.cpu_count(),
             "cache_state": config.cache_state,
-            "concurrency": 1,
+            "concurrency": config.search.concurrency,
             "client_transport": "asyncio HTTP/1.1 keep-alive, TCP_NODELAY, orjson",
             "telemetry": telemetry,
             "selection": config.selection,

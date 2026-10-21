@@ -24,6 +24,7 @@ from .selection import select_from_run
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
 DATA_REVISION = "f018922a46a51388348a307ec2fef28019a33026"
 BGE_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
+BGE_BASE_REVISION = "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a"
 
 
 def display(value: object) -> None:
@@ -88,14 +89,27 @@ def prepare_all_command(
     revision: Annotated[str, typer.Option()] = DATA_REVISION,
     with_bge: Annotated[bool, typer.Option(help="Also embed with BGE-small")] = False,
     bge_revision: Annotated[str, typer.Option()] = BGE_REVISION,
+    with_bge_base: Annotated[
+        bool, typer.Option(help="Also embed with BGE-base (768-d)")
+    ] = False,
+    bge_base_revision: Annotated[str, typer.Option()] = BGE_BASE_REVISION,
     dev_queries: Annotated[int, typer.Option(min=1)] = 50,
     seed: Annotated[int, typer.Option()] = 42,
     batch_size: Annotated[int, typer.Option(min=1)] = 64,
+    datasets: Annotated[list[str] | None, typer.Option()] = None,
 ) -> None:
     """Stage all four corpora, judgments, and Cohere arrays; skip complete ones."""
     report = asyncio.run(
         prepare_all(
-            data_root, revision, with_bge, bge_revision, dev_queries, seed, batch_size
+            data_root,
+            revision,
+            with_bge,
+            bge_revision,
+            dev_queries,
+            seed,
+            batch_size,
+            datasets or list(DATASETS_IN_ORDER),
+            {"bge_base": bge_base_revision} if with_bge_base else None,
         )
     )
     display(report)
@@ -104,12 +118,16 @@ def prepare_all_command(
 @app.command()
 def embed(
     dataset: Annotated[str, typer.Option()],
-    model: Annotated[str, typer.Option(help="bge (Cohere vectors come from prepare)")],
+    model: Annotated[
+        str, typer.Option(help="bge or bge_base (Cohere vectors come from prepare)")
+    ],
     data_root: Annotated[Path, typer.Option()] = Path("data"),
-    revision: Annotated[str, typer.Option()] = BGE_REVISION,
+    revision: Annotated[str | None, typer.Option()] = None,
     batch_size: Annotated[int, typer.Option(min=1)] = 64,
 ) -> None:
-    """Generate and checkpoint local BGE embeddings for one prepared dataset."""
+    """Generate and checkpoint local embeddings for one prepared dataset."""
+    if revision is None:
+        revision = {"bge": BGE_REVISION, "bge_base": BGE_BASE_REVISION}.get(model)
     output = data_root / "embeddings" / dataset / model
     asyncio.run(
         embed_dataset(data_root / "raw" / dataset, output, model, batch_size, revision)
@@ -179,9 +197,33 @@ def run(
     config: Annotated[Path, typer.Option(exists=True)],
     data: Annotated[Path, typer.Option(exists=True)],
     output: Annotated[Path, typer.Option()],
+    max_queries: Annotated[
+        int | None,
+        typer.Option(min=0, help="Override search.max_queries; 0 uses the whole split"),
+    ] = None,
+    concurrency: Annotated[
+        int | None, typer.Option(min=1, max=64, help="Override search.concurrency")
+    ] = None,
 ) -> None:
     """Run one model/dataset artifact through the configured search matrix."""
-    asyncio.run(run_benchmark(load_config(config), data, output))
+    settings = load_config(config)
+    if max_queries is not None:
+        settings = settings.model_copy(
+            update={
+                "search": settings.search.model_copy(
+                    update={"max_queries": max_queries or None}
+                )
+            }
+        )
+    if concurrency is not None:
+        settings = settings.model_copy(
+            update={
+                "search": settings.search.model_copy(
+                    update={"concurrency": concurrency}
+                )
+            }
+        )
+    asyncio.run(run_benchmark(settings, data, output))
     typer.echo(f"Completed benchmark. Results: {output / 'summary.json'}")
 
 

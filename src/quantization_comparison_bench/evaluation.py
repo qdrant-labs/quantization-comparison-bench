@@ -34,10 +34,11 @@ ARTIFACT_FILES = (
     "query_splits.json",
     "qrels.json",
 )
-EXPECTED_DIMENSIONS = {"cohere": 1024, "bge": 384}
+EXPECTED_DIMENSIONS = {"cohere": 1024, "bge": 384, "bge_base": 768}
 MODEL_LABELS = {
     "embed-english-v3.0": "cohere",
     "BAAI/bge-small-en-v1.5": "bge",
+    "BAAI/bge-base-en-v1.5": "bge_base",
     "synthetic-normal": "synthetic",
 }
 
@@ -180,6 +181,12 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
             summary[f"mean_{metric}_per_query"] = (
                 float(np.mean(values)) if values else None
             )
+        concurrency = {int(row.get("concurrency") or 1) for row in rows}
+        summary["concurrency"] = max(concurrency)
+        qps = [
+            float(row["pass_qps"]) for row in rows if row.get("pass_qps") is not None
+        ]
+        summary["pass_qps_mean"] = float(np.mean(qps)) if qps else None
         summaries.append(summary)
     return {"groups": summaries}
 
