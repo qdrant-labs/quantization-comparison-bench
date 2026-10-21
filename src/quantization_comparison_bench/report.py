@@ -399,7 +399,7 @@ def _quality_table(groups: list[dict[str, Any]], show_point: bool) -> list[str]:
                 f"{g['delta_ndcg_at_10']:+.3f}" + _ci(g["delta_ndcg_ci95"]),
                 f"{_f(g['server_ms']['p50'], 2)} / {_f(g['server_ms']['p95'], 2)}",
                 _f(g["request_ms"]["p95"], 2),
-                f"{_f(g.get(\'qps\'), 0)} @ {g.get(\'concurrency\', 1)}",
+                f"{_f(g.get('qps'), 0)} @ {g.get('concurrency', 1)}",
                 _f(g["cpu_per_query"], 0),
                 _f(g["vector_io_read_per_query"], 0),
             ]
