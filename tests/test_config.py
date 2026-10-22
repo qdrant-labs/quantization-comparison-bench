@@ -125,7 +125,12 @@ def test_concurrency_is_bounded_and_defaults_to_one() -> None:
     assert Benchmark(methods=[Method(name="float32")]).search.concurrency == 1
     with pytest.raises(ValidationError):
         Benchmark(methods=[Method(name="float32")], search={"concurrency": 0})
-    assert (
-        load_config(Path("configs/memory-pressure-bge.yaml")).memory_limit_bytes
-        == 512 * 1024 * 1024
-    )
+    capped = load_config(Path("configs/search-cap-bge.yaml"))
+    assert capped.search_memory_limit_bytes == 512 * 1024 * 1024
+    assert capped.memory_limit_bytes is None
+    with pytest.raises(ValidationError):
+        Benchmark(
+            methods=[Method(name="float32")],
+            require_telemetry=True,
+            search_memory_limit_bytes=1 << 30,
+        )
