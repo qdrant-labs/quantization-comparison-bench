@@ -296,6 +296,32 @@ async def reset_cache(
     }
 
 
+async def run_cap_command(command: str, limit_bytes: int) -> dict[str, Any]:
+    completed = await asyncio.to_thread(
+        subprocess.run,
+        [*shlex.split(command), str(limit_bytes)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"cap command failed ({completed.returncode}): {completed.stderr[-2000:]}"
+        )
+    cgroup = Path(os.environ["QDRANT_CGROUP_PATH"])
+    effective = (cgroup / "memory.max").read_text().strip()
+    if effective != str(limit_bytes):
+        raise RuntimeError(
+            f"cgroup memory.max is {effective} after the cap command, expected {limit_bytes}"
+        )
+    return {
+        "command": command,
+        "limit_bytes": limit_bytes,
+        "stdout": completed.stdout[-1000:],
+        "host": host_memory(),
+    }
+
+
 async def measure_cell(
     client: httpx.AsyncClient,
     connection: QueryConnection,
@@ -467,6 +493,15 @@ async def measure_method(
         text, after_index = await server_metrics(client, collection)
         (directory / "metrics-before.prom").write_text(text)
         write_json(directory / "server-memory-post-index.json", after_index)
+        if config.search_memory_limit_bytes is not None:
+            # Lower the cap only now: the index was built under the normal cap,
+            # and the measured passes run with the originals unable to fit.
+            write_json(
+                directory / "search-cap.json",
+                await run_cap_command(
+                    config.search_cap_command or "", config.search_memory_limit_bytes
+                ),
+            )
         grid = config.grid(method)
         random.Random(config.seed).shuffle(grid)
         for cell in grid:
@@ -518,6 +553,19 @@ async def measure_method(
         try:
             await sampler
         finally:
+            if (
+                config.search_memory_limit_bytes is not None
+                and config.restore_cap_command
+            ):
+                try:
+                    write_json(
+                        directory / "restore-cap.json",
+                        await run_cap_command(
+                            config.restore_cap_command, config.search_memory_limit_bytes
+                        ),
+                    )
+                except RuntimeError as error:
+                    write_json(directory / "restore-cap.json", {"error": str(error)})
             if created:
                 try:
                     await request(client, "DELETE", f"/collections/{collection}")
@@ -670,7 +718,10 @@ async def run_benchmark(config: Benchmark, data_path: Path, output: Path) -> Non
                             output,
                         )
                     except Exception as error:
-                        if config.memory_limit_bytes is None:
+                        if (
+                            config.memory_limit_bytes is None
+                            and config.search_memory_limit_bytes is None
+                        ):
                             raise
                         # Under a memory cap an OOM kill or build timeout is a
                         # result. Record it, wait for the server, clean up, go on.

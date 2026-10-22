@@ -113,9 +113,15 @@ queries and build variation are reported instead of single-run precision.
 
 ## Memory pressure and cache state
 
-`configs/memory-pressure.yaml` runs Quora/Cohere with a fixed 1 GiB container
-cap, below the roughly 2 GiB float32 corpus, and `configs/memory-pressure-bge.yaml`
-runs Quora/BGE-small at 512 MiB, below its roughly 0.8 GiB corpus. The same cap applies to every
+`configs/search-cap.yaml` runs Quora/Cohere with a 1 GiB container cap, below
+the roughly 2 GiB float32 corpus, and `configs/search-cap-bge.yaml` runs
+Quora/BGE-small at 512 MiB, below its roughly 0.8 GiB corpus. Each index is
+built under the normal cap; the cap is lowered in place with `docker update`
+before the measured passes and restored afterwards, so the experiment measures
+search with originals that do not fit, not whether a build survives the cap.
+The first design applied the cap during the build too: on Quora every method
+except product quantization was OOM-killed or timed out while indexing, which
+is kept as a recorded result. The same cap applies to every
 method; OOMs, timeouts, and build failures are recorded as outcomes. The
 runner checks the effective cgroup limit and requires VM telemetry before
 starting.

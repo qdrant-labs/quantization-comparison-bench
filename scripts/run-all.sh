@@ -7,8 +7,9 @@
 # 1. Small workloads: scifact and nfcorpus, both models (needs prepared data).
 # 2. Stage fiqa and quora with BGE (no timing runs while embedding).
 # 3. Large workloads: fiqa and quora, both models.
-# 4. Memory-pressure runs (Quora/Cohere at 1 GiB, Quora/BGE at 512 MiB),
-#    restore the cap, then cold-start runs for every artifact.
+# 4. Capped-search runs (Quora/Cohere at 1 GiB, Quora/BGE at 512 MiB, cap
+#    applied after each index is built), then cold-start runs for every
+#    artifact.
 # 5. Third model: stage BGE-base (768-d) for scifact, nfcorpus, and fiqa and
 #    run those workloads.
 #
@@ -69,18 +70,17 @@ for pair in "fiqa cohere" "fiqa bge" "quora cohere" "quora bge"; do
   workload $pair
 done
 
-log "step 4a: memory pressure"
-if complete "$root/quora-cohere/memory-pressure"; then
-  log "memory pressure (cohere) already complete"
+log "step 4a: rescoring from disk (search-phase cap)"
+if complete "$root/quora-cohere/search-cap"; then
+  log "search cap (cohere) already complete"
 else
-  as_root "scripts/memory-pressure.sh $root cohere 1g configs/memory-pressure.yaml"
+  as_root "scripts/memory-pressure.sh $root cohere configs/search-cap.yaml"
 fi
-if complete "$root/quora-bge/memory-pressure-bge"; then
-  log "memory pressure (bge) already complete"
+if complete "$root/quora-bge/search-cap-bge"; then
+  log "search cap (bge) already complete"
 else
-  as_root "scripts/memory-pressure.sh $root bge 512m configs/memory-pressure-bge.yaml"
+  as_root "scripts/memory-pressure.sh $root bge configs/search-cap-bge.yaml"
 fi
-set_cap 28g
 
 log "step 4b: cold start"
 export QBENCH_ALLOW_CACHE_RESET=1

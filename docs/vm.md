@@ -96,7 +96,7 @@ scripts/memory-pressure.sh
 
 Sets `QDRANT_MEMORY_LIMIT=1g`, recreates the container, re-sources the
 telemetry targets, records the effective host limit, and runs
-`configs/memory-pressure.yaml` on Quora/Cohere. The runner verifies
+`configs/search-cap.yaml` on Quora/Cohere. The runner verifies
 `memory.max` equals 1 GiB before measuring. Keep the cap identical across
 methods and report OOMs, timeouts, and index-build failures. Restore
 `QDRANT_MEMORY_LIMIT=28g` and recreate the container afterwards.

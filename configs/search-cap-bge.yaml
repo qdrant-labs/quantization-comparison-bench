@@ -1,15 +1,18 @@
-# Quora/Cohere under a fixed 1 GiB container cap, below the ~2 GiB float32
-# corpus. The run refuses to start unless the cgroup memory.max equals this
-# value and VM telemetry is readable. Record OOMs, timeouts, and build
-# failures as outcomes; do not relax the cap per method.
+# Quora/bge: rescoring from disk. Each index is built under the normal
+# 28 GiB cap, then the container cap is lowered in place to 536870912 bytes
+# (below the ~0.8 GB of float32 originals) for the measured passes only, and
+# restored afterwards. The runner verifies the effective cgroup limit at each
+# step. A method that fails under the cap is recorded and skipped.
 expected_qdrant_version: "1.19.2"
 datasets: [quora]
-models: [cohere]
+models: [bge]
 builds: 1
 seed: 42
 require_telemetry: true
-memory_limit_bytes: 1073741824
-indexing_timeout_seconds: 14400
+search_memory_limit_bytes: 536870912
+search_cap_command: scripts/set-cap.sh
+restore_cap_command: scripts/restore-cap.sh
+indexing_timeout_seconds: 7200
 hnsw:
   m: 16
   ef_construct: 100

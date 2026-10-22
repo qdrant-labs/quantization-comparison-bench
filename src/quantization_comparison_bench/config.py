@@ -143,6 +143,13 @@ class Benchmark(Settings):
     require_telemetry: bool = False
     # Expected cgroup memory.max of the Qdrant container; the run fails on mismatch.
     memory_limit_bytes: int | None = Field(default=None, ge=1)
+    # Memory-pressure protocol: build under the normal cap, then lower the
+    # container cap to this value before the measured passes. The commands
+    # receive the byte count as their only argument and must leave the same
+    # container running (docker update, not recreate).
+    search_memory_limit_bytes: int | None = Field(default=None, ge=1)
+    search_cap_command: str | None = None
+    restore_cap_command: str | None = None
     # Provenance written by `qbench select`; copied into the run manifest.
     selection: dict[str, Any] | None = None
 
@@ -160,6 +167,14 @@ class Benchmark(Settings):
                 )
         if self.memory_limit_bytes is not None and not self.require_telemetry:
             raise ValueError("memory_limit_bytes requires require_telemetry")
+        if self.search_memory_limit_bytes is not None:
+            if not (self.search_cap_command and self.restore_cap_command):
+                raise ValueError(
+                    "search_memory_limit_bytes requires search_cap_command and "
+                    "restore_cap_command"
+                )
+            if not self.require_telemetry:
+                raise ValueError("search_memory_limit_bytes requires require_telemetry")
         if self.selection is not None and self.search.split != "test":
             raise ValueError("A selected configuration must evaluate the test split")
         return self

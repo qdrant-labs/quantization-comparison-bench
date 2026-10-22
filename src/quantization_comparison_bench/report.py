@@ -30,6 +30,8 @@ STAGES = (
     "cold-start",
     "memory-pressure",
     "memory-pressure-bge",
+    "search-cap",
+    "search-cap-bge",
 )
 SEGMENT = re.compile(r"^0/segments/([^/]+)/")
 

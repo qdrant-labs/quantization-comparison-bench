@@ -99,7 +99,7 @@ experiments are separate because they change the host condition:
 
 ```bash
 scripts/memory-pressure.sh                 # Quora/Cohere under a fixed 1 GiB container cap
-scripts/memory-pressure.sh results bge 512m configs/memory-pressure-bge.yaml   # Quora/BGE under 512 MiB
+scripts/memory-pressure.sh results bge configs/search-cap-bge.yaml   # Quora/BGE under 512 MiB
 QBENCH_ALLOW_CACHE_RESET=1 uv run qbench run --config configs/cold-start.yaml \
   --data data/embeddings/fiqa/cohere --output results/fiqa-cohere/cold-start
 ```
