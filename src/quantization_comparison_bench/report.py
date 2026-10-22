@@ -158,6 +158,13 @@ def summarize_groups(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for metric in ("cpu", "vector_io_read", "payload_io_read"):
             values = [float(m[metric]) for m in members if m.get(metric) is not None]
             row[f"{metric}_per_query"] = float(np.mean(values)) if values else None
+        # First pass versus later passes: under a search-phase cap or after a
+        # cache drop, repeated passes re-warm the few thousand vectors the same
+        # queries touch, so the first pass is the honest disk figure.
+        first = [float(m["server_ms"]) for m in members if int(m.get("repeat", 0)) == 0]
+        later = [float(m["server_ms"]) for m in members if int(m.get("repeat", 0)) > 0]
+        row["first_pass_server_ms"] = _percentiles(first)
+        row["later_pass_server_ms"] = _percentiles(later)
         row["concurrency"] = max(int(m.get("concurrency") or 1) for m in members)
         qps = {
             (int(m["build"]), int(m["repeat"])): float(m["pass_qps"])

@@ -67,6 +67,17 @@ def test_bootstrap_interval_contains_the_mean_and_handles_tiny_inputs() -> None:
     assert bootstrap([1.0]) == []
 
 
+def test_first_pass_is_reported_separately() -> None:
+    rows = [
+        record("a", 0, 0, 1.0, 0.0, 40.0),
+        record("a", 0, 1, 1.0, 0.0, 2.0),
+        record("a", 0, 2, 1.0, 0.0, 2.0),
+    ]
+    (group,) = summarize_groups(rows)
+    assert group["first_pass_server_ms"]["p50"] == 40.0
+    assert group["later_pass_server_ms"]["p50"] == 2.0
+
+
 def test_cold_start_head_and_tail_are_split() -> None:
     rows = [
         record(
