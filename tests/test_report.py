@@ -96,7 +96,7 @@ def _write_run(root: Path, stage: str, rows, status="complete", selection=None) 
                 "status": status,
                 "run_id": "r",
                 "git_revision": "abc",
-                "server": {"version": "1.19.2"},
+                "server": {"version": "1.20.0"},
                 "cache_state": "warm",
                 "query_ids": ["a", "b"],
                 "selection": selection,

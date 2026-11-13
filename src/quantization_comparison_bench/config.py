@@ -21,9 +21,9 @@ class Cell(Settings):
 
 class Method(Settings):
     name: str = Field(pattern=r"^[a-z0-9_]+$")
-    datatype: Literal["float32", "turbo4"] = "float32"
+    datatype: Literal["float32", "turbo4", "turbo8", "turbo16"] = "float32"
     quantizer: Literal["none", "scalar", "binary", "product", "turbo"] = "none"
-    bits: Literal["1", "1.5", "2", "4"] | None = None
+    bits: Literal["1", "1.5", "2", "4", "8"] | None = None
     compression: Literal["x8", "x16"] | None = None
     quantile: float = Field(default=0.99, ge=0.5, le=1)
     encoding: Literal["one_bit", "one_and_half_bits", "two_bits"] = "one_bit"
@@ -78,7 +78,7 @@ class Method(Settings):
                     "product": {"compression": self.compression, "memory": "pinned"}
                 }
             case "turbo":
-                bits = {"1": "bits1", "1.5": "bits1_5", "2": "bits2", "4": "bits4"}
+                bits = {"1": "bits1", "1.5": "bits1_5", "2": "bits2", "4": "bits4", "8": "bits8"}
                 return {"turbo": {"bits": bits[str(self.bits)], "memory": "pinned"}}
 
 
@@ -122,7 +122,7 @@ class Search(Settings):
 
 
 class Benchmark(Settings):
-    expected_qdrant_version: str = "1.19.2"
+    expected_qdrant_version: str = "1.20.0"
     datasets: list[str] = Field(
         default_factory=lambda: ["fiqa", "scifact", "nfcorpus", "quora"]
     )

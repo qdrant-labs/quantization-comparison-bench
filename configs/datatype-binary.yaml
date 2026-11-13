@@ -1,7 +1,7 @@
 # Binary retrieval rescored against turbo4 stored vectors, next to the same
 # binary retrieval rescored against float32 originals. Oversampling 8 is the
 # point binary needed in development selection; 2 matches the primary run.
-expected_qdrant_version: "1.19.2"
+expected_qdrant_version: "1.20.0"
 datasets: [fiqa, scifact, nfcorpus, quora]
 models: [cohere, bge, bge_base]
 builds: 3

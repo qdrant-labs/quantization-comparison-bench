@@ -18,7 +18,7 @@ CONFIGS = sorted(Path("configs").glob("*.yaml"))
 @pytest.mark.parametrize("path", CONFIGS, ids=[path.stem for path in CONFIGS])
 def test_shipped_configs_load_and_plan(path: Path) -> None:
     config = load_config(path)
-    assert config.expected_qdrant_version == "1.19.2"
+    assert config.expected_qdrant_version == "1.20.0"
     for method in config.methods:
         assert config.grid(method)
 
@@ -96,6 +96,9 @@ def test_extended_encodings_map_to_server_names() -> None:
     assert Method(name="t", quantizer="turbo", bits=4).quantization() == {
         "turbo": {"bits": "bits4", "memory": "pinned"}
     }
+    assert Method(name="t", quantizer="turbo", bits=8).quantization() == {
+        "turbo": {"bits": "bits8", "memory": "pinned"}
+    }
     assert Method(name="b", quantizer="binary", encoding="two_bits").quantization() == {
         "binary": {"encoding": "two_bits", "memory": "pinned"}
     }
@@ -110,6 +113,13 @@ def test_extended_encodings_map_to_server_names() -> None:
     }
     with pytest.raises(ValidationError):
         Method(name="t", quantizer="turbo", bits=3)
+
+
+def test_turbo_storage_datatypes_are_accepted() -> None:
+    for datatype in ("turbo4", "turbo8", "turbo16"):
+        assert Method(name="d", datatype=datatype).datatype == datatype
+    with pytest.raises(ValidationError):
+        Method(name="d", datatype="turbo2")
 
 
 def test_indexing_threads_are_explicit_and_shared() -> None:

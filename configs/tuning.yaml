@@ -1,6 +1,6 @@
 # Development-split sweep used by `qbench select`. Never report these numbers
 # as results; they choose the frozen settings evaluated on the test split.
-expected_qdrant_version: "1.19.2"
+expected_qdrant_version: "1.20.0"
 datasets: [fiqa, scifact, nfcorpus, quora]
 models: [cohere, bge, bge_base]
 builds: 1
@@ -23,3 +23,4 @@ methods:
   - {name: binary1, quantizer: binary, query_encoding: binary}
   - {name: product8, quantizer: product, compression: x8}
   - {name: turbo4, quantizer: turbo, bits: 4}
+  - {name: turbo_bits8, quantizer: turbo, bits: 8}

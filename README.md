@@ -1,7 +1,7 @@
 # Qdrant quantization comparison
 
 Reproducible VM benchmark comparing scalar, binary, product, and TurboQuant
-quantization in Qdrant v1.19.2 on four English BEIR datasets (FiQA, SciFact,
+quantization in Qdrant v1.20.0 on four English BEIR datasets (FiQA, SciFact,
 NFCorpus, Quora) with two embedding models: the supplied Cohere
 embed-english-v3.0 vectors (1,024 dimensions) and locally generated
 BGE-small-en-v1.5 vectors (384 dimensions). A separate experiment compares
@@ -123,8 +123,9 @@ page-fault counters. `uv run qbench report` turns completed runs into the
 article tables with bootstrap intervals. How to read them:
 [results](docs/results.md).
 
-Turbo8 is excluded until a release with verified server and client support
-exists; the merged pull requests are not in v1.19.2.
+The Turbo8 and Turbo16 stored datatypes and the 8-bit TurboQuant search copy
+(`bits8`) need Qdrant v1.20. They run in the datatype, primary, and ablation
+configurations as `datatype_turbo8`, `datatype_turbo16`, and `turbo_bits8`.
 
 ## Development
 

@@ -37,10 +37,11 @@ establish universal rules.
 
 ## Software and VM
 
-Qdrant v1.19.2, the latest published release verified on 20 October 2026. The
-resolved container digest, repository commit, and Python lockfile hash are
-recorded by `scripts/vm-env.sh` before measurements. Turbo8 stays excluded
-until released server and client support is verified in a separate protocol.
+Qdrant v1.20.0, the first release with the Turbo8 and Turbo16 datatypes and the
+8-bit TurboQuant search copy. The resolved container digest, repository commit,
+and Python lockfile hash are recorded by `scripts/vm-env.sh` before
+measurements. The first study ran on v1.19.2; the methods that changed in v1.20
+were run on v1.20.0, and the unchanged ones were re-checked on NFCorpus with BGE.
 
 Dedicated Linux x86-64 VM, 8 vCPUs, 32 GiB RAM, 200 GiB SSD, no GPU. The
 client runs on the VM. One active collection, one shard, one replica. CPU,
@@ -152,4 +153,4 @@ Dylan/Neil publication review follow the VM runs. The article remains 3,000 to
 - [CohereLabs BEIR embeddings](https://huggingface.co/datasets/CohereLabs/beir-embed-english-v3)
 - [BGE-small-en-v1.5 model card](https://huggingface.co/BAAI/bge-small-en-v1.5)
 - [BEIR datasets and evaluation](https://github.com/beir-cellar/beir)
-- Turbo8 (not in v1.19.2): [qdrant#10874](https://github.com/qdrant/qdrant/pull/10874), [qdrant#10939](https://github.com/qdrant/qdrant/pull/10939)
+- Turbo8 and Turbo16 datatypes ([vectors documentation](https://qdrant.tech/documentation/manage-data/vectors/#turboquant-datatypes)): [qdrant#10874](https://github.com/qdrant/qdrant/pull/10874), [qdrant#10939](https://github.com/qdrant/qdrant/pull/10939)

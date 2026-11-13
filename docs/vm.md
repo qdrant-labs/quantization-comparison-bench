@@ -29,11 +29,11 @@ Never put keys in command arguments, notebook outputs, YAML files, or Git.
 
 ## Freeze the server
 
-Qdrant starts from the release tag `v1.19.2`. Before measured runs, resolve and
+Qdrant starts from the release tag `v1.20.0`. Before measured runs, resolve and
 pin the image digest in `.env`, then recreate the container:
 
 ```bash
-docker image inspect qdrant/qdrant:v1.19.2 --format '{{json .RepoDigests}}'
+docker image inspect qdrant/qdrant:v1.20.0 --format '{{json .RepoDigests}}'
 # QDRANT_IMAGE=qdrant/qdrant@sha256:...
 docker compose up -d --force-recreate
 ```

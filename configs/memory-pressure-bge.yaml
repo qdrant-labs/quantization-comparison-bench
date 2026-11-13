@@ -2,7 +2,7 @@
 # float32 corpus, the BGE counterpart of memory-pressure.yaml. The run refuses to start unless the cgroup memory.max equals this
 # value and VM telemetry is readable. Record OOMs, timeouts, and build
 # failures as outcomes; do not relax the cap per method.
-expected_qdrant_version: "1.19.2"
+expected_qdrant_version: "1.20.0"
 datasets: [quora]
 models: [bge]
 builds: 1
