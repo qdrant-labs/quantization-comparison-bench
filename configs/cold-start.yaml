@@ -3,7 +3,7 @@
 # requests are issued; each pass warms as its queries proceed, so per-query
 # `position` matters when reading these records. I/O and page-fault counters
 # are snapshotted before and after each pass in passes.jsonl.
-expected_qdrant_version: "1.19.2"
+expected_qdrant_version: "1.20.0"
 datasets: [fiqa, scifact, nfcorpus, quora]
 models: [cohere, bge, bge_base]
 builds: 1

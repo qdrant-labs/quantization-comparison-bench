@@ -7,7 +7,7 @@ memory_resident_bytes 190840832
 collection_hardware_metric_cpu{id="probe"} 64
 collection_hardware_metric_cpu{id="other"} 9
 collection_hardware_metric_vector_io_read{id="probe"} 12
-app_info{name="qdrant",version="1.19.2"} 1
+app_info{name="qdrant",version="1.20.0"} 1
 """
 
 
